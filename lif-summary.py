@@ -44,7 +44,7 @@ class lif_summary:
         self.lif_file = lif_file
         self.filename = os.path.splitext(self.lif_file)[0]
         self.reader = bioformats.ImageReader(self.lif_file, perform_init=True)
-        self.categorized_series = {"img_simple":[],"img_multiC":[],"img_multiT":[],"img_multiTC":[],"other":[]}
+        self.categorized_series = {"img_simple":[],"img_multiC":[],"img_multiT":[],"img_multiTC":[],"other":[],"z_stack":[]}
         # specify categories under which images "series" will get sorted later
     
     def get_hist_boundaries(self, omeobject, image_name):
@@ -152,9 +152,10 @@ class lif_summary:
             #print(new_imagentry)
             ## sort dict according to entries
             
-            # move Z-stack to category other, export not supported yet...
-            if new_imagentry['SizeZ'] > 1:
-                self.categorized_series["other"].append(new_imagentry)  
+            # move z-stack to category z_stack
+            # todo in future: check for multichannel z-stacks
+            elif new_imagentry['SizeZ'] > 1:
+                self.categorized_series["z_stack"].append(new_imagentry) 
             
             # move EnvironmentalGraph-files into category other
             elif "EnvironmentalGraph" in new_imagentry["name"]:
@@ -228,6 +229,7 @@ class lif_summary:
             os.makedirs(os.path.join(outputfolder,"raw tifs","images"))
             os.makedirs(os.path.join(outputfolder,"raw tifs","videos"))
             os.makedirs(os.path.join(outputfolder,"raw tifs","multichannel images"))
+            os.makedirs(os.path.join(outputfolder,"raw tifs","zstacks")) # do it smarter in future and just create folders if imagetypes exist...
             os.makedirs(os.path.join(outputfolder,"compressed","images"))
             os.makedirs(os.path.join(outputfolder,"compressed","videos"))
             #os.makedirs(os.path.join(outputfolder,"compressed","multichannel images")) #does not work yet
@@ -249,7 +251,7 @@ class lif_summary:
         """
             reads image via bioformats reader to np arary
         """
-        image = self.reader.read(c=c, z=0, t=t, series=series, rescale=False)
+        image = self.reader.read(c=c, z=z, t=t, series=series, rescale=False)
         
         image[image < 0] = image[image < 0] + 65535 #weird results were happening here when 12 bit data was saved in 16 bit container?
         image_uint = np.uint16(image)
@@ -345,6 +347,32 @@ class lif_summary:
             image = self.get_image_array(c= None, z=0, t=0, series = series_nr)
             image = np.moveaxis(image,2,0)  #exchange dimensions
             self.save_single_tif(image,outputpath, resolution_mpp, photometric = 'minisblack')      
+    
+        # export zstacks images
+        total_zstack = len(self.categorized_series["z_stack"])
+        print("exporting " + str(total_zstack) + " zstacks") 
+        
+        for nr, imagentry in enumerate(self.categorized_series["z_stack"]):
+
+            series_nr = imagentry["nr"]
+            series_name = imagentry["name"]
+            resolution_mpp = imagentry["mpp"]
+            planes = imagentry['SizeZ']
+            #totalchannels = imagentry['SizeC']
+            print("exporting z-stack ", series_name)
+            
+            outputpath = os.path.join(self.filename,"raw tifs","zstacks",series_name)  
+
+            if not os.path.exists(outputpath):
+                    os.makedirs(outputpath)
+
+            for plane in np.arange(planes):
+                self.printProgressBar(plane+1, planes, prefix = 'Progress:', suffix = 'Complete', length = 50)
+                
+                #outputpath = os.path.join(self.filename,"raw tifs","videos", series_name, series_name+"-{:04d}.tif".format(frame))            
+                planepath = os.path.join(outputpath, series_name+"-{:04d}.tif".format(plane))
+                image = self.get_image_array(c=0, z=plane, t=0, series = series_nr)
+                self.save_single_tif(image,planepath, resolution_mpp)            
     
     def adj_contrast(self, image, vmin=None, vmax=None):
         """
