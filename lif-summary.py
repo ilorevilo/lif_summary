@@ -154,7 +154,7 @@ class lif_summary:
             
             # move z-stack to category z_stack
             # todo in future: check for multichannel z-stacks
-            elif new_imagentry['SizeZ'] > 1:
+            if new_imagentry['SizeZ'] > 1:
                 self.categorized_series["z_stack"].append(new_imagentry) 
             
             # move EnvironmentalGraph-files into category other
