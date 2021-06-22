@@ -155,7 +155,12 @@ class lif_summary:
             # move z-stack to category z_stack
             # todo in future: check for multichannel z-stacks
             if new_imagentry['SizeZ'] > 1:
-                self.categorized_series["z_stack"].append(new_imagentry) 
+                
+                if "/" in new_imagentry['name']:
+                    new_imagentry['name'] = new_imagentry['name'].split("/")[0]
+                    #new_imagentry['subfolder'] = new_imagentry['name'].split("/")[0]    # save folder name to create later
+                self.categorized_series["z_stack"].append(new_imagentry)
+            
             
             # move EnvironmentalGraph-files into category other
             elif "EnvironmentalGraph" in new_imagentry["name"]:
@@ -187,6 +192,8 @@ class lif_summary:
                 
                 #multichannel image
                 if new_imagentry['SizeC'] > 1:
+                    new_imagentry['name'] = new_imagentry['name'].split("/")[0] #can cause issues if in subfolder, quick fix
+                    
                     if "EnvironmentalGraph" not in new_imagentry["name"]:
                         self.categorized_series["img_multiC"].append(new_imagentry)
                 
