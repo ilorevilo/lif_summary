@@ -1,24 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-    lif_summary: easy creation and extraction of microscope images/ videos from a .lif-file
-    written by Oliver Schneider (08/2017)
+    lif_summary: simplified extraction of microscope images/ videos from a .lif-file
+    written by Oliver Schneider (06/2021)
   
 """
 
 import sys
 
 import matplotlib.pyplot as plt
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
+#from pptx import Presentation
+#from pptx.util import Inches, Pt
+#from pptx.dml.color import RGBColor
 
 import numpy as np
-import javabridge
-import bioformats
-from xml.etree import ElementTree as ETree
-from xml import etree as et
 
-from skimage.viewer import ImageViewer
+from readlif.reader import LifFile
+
+from xml.etree import ElementTree as ET
+from xml import etree as et
+from xml.dom import minidom
+
+#from skimage.viewer import ImageViewer
 from skimage import exposure
 import skimage
 import PIL
@@ -30,6 +32,9 @@ from itertools import zip_longest
 
 import glob
 import os
+from pathlib import Path
+
+
 import tifffile
 
 class lif_summary:
@@ -41,10 +46,25 @@ class lif_summary:
         """
             just specify path to lif-file in constructor
         """
-        self.lif_file = lif_file
-        self.filename = os.path.splitext(self.lif_file)[0]
-        self.reader = bioformats.ImageReader(self.lif_file, perform_init=True)
-        self.categorized_series = {"img_simple":[],"img_multiC":[],"img_multiT":[],"img_multiTC":[],"other":[],"z_stack":[]}
+        self.lif_path = Path(lif_file)
+        #self.filename = os.path.splitext(self.lif_file)[0]
+        
+        # abspath = self.lif_file.absolute()
+        
+        self.filename = self.lif_path.name
+        
+        print("importing file", self.filename)
+        
+        self.lifhandler = LifFile(self.lif_path)
+        
+        self.grouped_img = {"xy":[], "xyc":[], "xyz":[], "xyt":[],"xyct":[],"envgraph":[],"other":[]}
+        
+        self._get_overview()
+        
+        self._write_xml()
+        
+        #self.reader = bioformats.ImageReader(self.lif_file, perform_init=True)
+        #self.categorized_series = {"img_simple":[],"img_multiC":[],"img_multiT":[],"img_multiTC":[],"other":[],"z_stack":[]}
         # specify categories under which images "series" will get sorted later
     
     def get_hist_boundaries(self, omeobject, image_name):
@@ -85,6 +105,119 @@ class lif_summary:
                 break
 
         return resolution
+
+    def _build_query(self, imgentry, query=None):
+        """
+            constructs cmd to query specified element, takes also care of subfoldlers
+        """
+        # imgentry = entry from img_list
+        # procedure works, however a bit cumbersome... better to directly include in readlif
+        
+        path = imgentry["path"] # subfolders are nested here: projectname/subf1/subf2/
+        sfolders = path.split("/")[1:-1] # split by / and take all except first and last
+        name = imgentry["name"]
+        
+        elquery = 'Element/Children' # main entrypoint, all images are always children of main element
+        for sfolder in sfolders:
+            elquery = elquery + f'/Element[@Name="{sfolder}"]/Children' # build query of all subfolders
+            
+        elquery = elquery + f'/Element[@Name="{name}"]' # query for element with specified name
+        query = elquery + query
+        return query
+
+    def _query_hist(self, imgentry):
+        """
+            reads out BlackValue and WhiteValue for specific imgentry
+            take care, multichannel not implemented yet
+        """
+        query = self._build_query(imgentry, "/Data/Image/Attachment/ChannelScalingInfo")
+        
+        rootel = self.lifhandler.xml_root
+        blackval = rootel.find(query).attrib["BlackValue"]
+        whiteval = rootel.find(query).attrib["WhiteValue"]
+        
+        return [blackval, whiteval]
+    
+    def _get_overview(self):
+        """
+            extracts information of stored images from metadata
+            fills dict self.grouped_img
+        """
+        
+        for idx, img in enumerate(self.lifhandler.image_list):
+            
+            print(img)
+            img["idx"] = idx
+            
+            if ('EnvironmentalGraph') in img["name"]:
+                self.grouped_img["envgraph"].append(img)
+                continue
+            
+            dimtuple = img["dims"]
+            Nx, Ny, Nz, NT = dimtuple[0], dimtuple[1], dimtuple[2], dimtuple[3]
+             # dimension tuple must be indexed with int, 0:x, 1:y, 2:z, 3:t, 4:m mosaic tile
+            NC = img["channels"]
+
+            # xy (simple image)
+            if (Nz == 1 and NT == 1 and NC == 1):
+                print("entry is xy")
+                self.grouped_img["xy"].append(img)
+                continue
+
+            # xyc (multichannel image)
+            if (Nz == 1 and NT == 1 and NC > 1):
+                print("entry is xyc")
+                self.grouped_img["xyc"].append(img)
+                continue
+
+            # xyz (singlechannel zstack)
+            if (Nz > 1 and NT == 1 and NC > 1):
+                print("entry is xyz")
+                self.grouped_img["xyz"].append(img)
+                continue
+                
+            # xyt singlechannel video/ timelapse
+            if (Nz == 1 and NT > 1 and NC==1):
+                print("entry is xyt")
+            
+                img["fps"] = img["scale"][3]*10**6
+                self.grouped_img["xyt"].append(img)
+                continue
+                
+            # xyct (multichannel video/ timelapse)
+            if (Nz ==1 and NT > 1 and NC>1):
+                print("entry is xyct")
+            
+                img["fps"] = img["scale"][3]*10**6
+                self.grouped_img["xyct"].append(img)
+                continue                           
+                
+            # add to category other if no previously checked category applies
+            self.grouped_img["other"].append(img)
+        
+        # find blackval/whiteval (or even other param if desired) for xy and xyt-images
+        for cat in ["xy","xyt"]:
+            imglist = self.grouped_img[cat]
+            
+            for img in imglist:
+                black_val, white_val = self._query_hist(img)
+                img["black_val"] = black_val
+                img["white_val"] = white_val
+    
+    def _write_xml(self):
+        """
+            writes metadata of lif-file in pretty xml
+        """
+
+        #todo: change outputfolder
+        xmlstr = minidom.parseString(ET.tostring(self.lifhandler.xml_root)).toprettyxml(indent="   ")
+        
+        fname = self.lif_path.stem + "_meta.xml"
+        with open(fname, "w") as f:
+            f.write(xmlstr)        
+        #https://stackoverflow.com/questions/56682486/xml-etree-elementtree-element-object-has-no-attribute-write
+        
+
         
     def get_image_overview(self):
         """
@@ -680,6 +813,7 @@ class lif_summary:
         bioformats.clear_image_reader_cache()
         
 def main():
+    """
     javabridge.start_vm(class_path=bioformats.JARS, max_heap_size='8G')
     # issues in ipython... start manually there
     
@@ -703,6 +837,6 @@ def main():
         os.rename(inputfile, os.path.join(os.path.splitext(inputfile)[0], inputfile))
         print("finished")
     
-                   
+    """
 if __name__ == "__main__":
     main()
