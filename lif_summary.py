@@ -53,7 +53,7 @@ class lif_summary:
         
         self.filename = self.lif_path.stem
         self.filename_full = self.lif_path.name
-        self.outdir = self.lif_path.parent/self.filename
+        self.outdir = self.lif_path.parent/self.filename       
         
         print("importing file", self.filename_full)
         
@@ -61,6 +61,8 @@ class lif_summary:
         
         # specify categories under which images "series" will get sorted later        
         self.grouped_img = {"xy":[], "xyc":[], "xyz":[], "xyt":[],"xyct":[],"envgraph":[],"other":[]}
+
+        self.outdir.mkdir(parents=True, exist_ok=True)
         
         self._get_overview()
         self._write_xml()
@@ -263,6 +265,21 @@ class lif_summary:
             
             imgpath_jpg = compfolder/(img_name+".jpg")
             skimage.io.imsave(imgpath_jpg, labeled_image)
+        
+    def export_xyz(self):
+        """
+            exports all xyz image entries (=zstacks)
+            - raw export: tif 
+            - compressed export: none
+        """        
+        #### raw export folder
+        rawfolder = self.outdir/"Images_xyz"
+        rawfolder.mkdir(parents=True, exist_ok=True)
+        
+        # iterate all images
+        for imgentry in self.grouped_img["xyz"]:
+            # create overall folder for zstack
+            pass
         
     def get_image_overview(self):
         """
@@ -635,10 +652,11 @@ class lif_summary:
         
         image_scalebar = PIL.Image.fromarray(input_image)   #np.uint8(input_image*255)
         
-        dimX_px = input_image.shape[0]
+        dimX_px = input_image.shape[1]
+        dimY_px = input_image.shape[0]
         initial_scale_length = dimX_px * 0.2 * microns_per_pixel
         
-        text_height_px = int(round(dimX_px * 0.05))
+        text_height_px = int(round(dimY_px * 0.05))
         
         scale_values = [1,2,5,10,15,20,30,40,50,70,100,150,200,300,400,500,700,1000]
         drawfont = ImageFont.truetype("arial.ttf", text_height_px)
@@ -650,22 +668,22 @@ class lif_summary:
         w_caption, h_caption = draw.textsize(scale_caption, font = drawfont)
         
         scale_length_px = scale_length_microns / microns_per_pixel
-        scale_height_px = dimX_px * 0.01
+        scale_height_px = dimY_px * 0.01
         
         bg_square_spacer_px = scale_length_px * 0.07
         
         bg_square_length_px = scale_length_px + 2 * bg_square_spacer_px
         bg_square_height_px = text_height_px + scale_height_px + 2 * bg_square_spacer_px
-                
+
         if dimX_px > 800:
-        
-            draw.rectangle(((dimX_px - bg_square_length_px, dimX_px - bg_square_height_px), (dimX_px, dimX_px)), fill="black")
-            draw.rectangle(((dimX_px - bg_square_length_px + bg_square_spacer_px, dimX_px - bg_square_spacer_px - scale_height_px), (dimX_px - bg_square_spacer_px, dimX_px - bg_square_spacer_px)), fill="white")
-            draw.text((dimX_px - bg_square_length_px + bg_square_spacer_px + bg_square_length_px/2 - w_caption/2, dimX_px - bg_square_height_px + bg_square_spacer_px/2), scale_caption, font = drawfont, fill="white")# scale_caption.decode('utf8')
+            #print(dimX_px - bg_square_length_px, dimX_px - bg_square_height_px)
+            draw.rectangle(((dimX_px - bg_square_length_px, dimY_px - bg_square_height_px), (dimX_px, dimY_px)), fill="black")
+            draw.rectangle(((dimX_px - bg_square_length_px + bg_square_spacer_px, dimY_px - bg_square_spacer_px - scale_height_px), (dimX_px - bg_square_spacer_px, dimY_px - bg_square_spacer_px)), fill="white")
+            draw.text((dimX_px - bg_square_length_px + bg_square_spacer_px + bg_square_length_px/2 - w_caption/2, dimY_px - bg_square_height_px + bg_square_spacer_px/2), scale_caption, font = drawfont, fill="white")# scale_caption.decode('utf8')
 
             # burn title if provided
             if image_name != None:
-                title_height_px = int(round(dimX_px * 0.05))
+                title_height_px = int(round(dimY_px * 0.05))
                 drawfont = ImageFont.truetype("arial.ttf", title_height_px)
                 draw.rectangle(((0,0),(dimX_px,title_height_px*1.2)), fill = "black")
                 draw.text((0,0),image_name, font = drawfont, fill = "white")
@@ -871,15 +889,6 @@ class lif_summary:
         
         outputpath = os.path.join(str(self.filename),str(self.filename) + '_summary.pptx')
         prs.save(outputpath)
-     
-    def close(self):
-        """
-            closes bioformats reader
-        """
-
-        self.reader.close()
-        bioformats.release_image_reader(self.lif_file)
-        bioformats.clear_image_reader_cache()
         
 def main():
     """
