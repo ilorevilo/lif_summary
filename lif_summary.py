@@ -171,7 +171,7 @@ class lif_summary:
                 continue
 
             # xyz (singlechannel zstack)
-            if (Nz > 1 and NT == 1 and NC > 1):
+            if (Nz > 1 and NT == 1 and NC == 1):
                 print("entry is xyz")
                 self.grouped_img["xyz"].append(img)
                 continue
@@ -278,8 +278,31 @@ class lif_summary:
         
         # iterate all images
         for imgentry in self.grouped_img["xyz"]:
-            # create overall folder for zstack
-            pass
+
+            resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
+            img_idx = imgentry["idx"]
+            imgname = imgentry["name"]
+            imghandler = self.lifhandler.get_image(img_idx)   
+            
+            # get correct z-spacing dz
+            # take care! might need to be adjusted if reader.py changes
+            z_spacing = imgentry["scale_n"][3] # planes per micron
+            Nz = imgentry["dims"][2]
+            total_z = Nz/z_spacing
+            dz = total_z/(Nz-1)
+            
+            dzstring = f"-dz_{dz:.2f}_um".replace(".","_") # write plane spacing into foldername such that it's easily accessible
+            stackfolder = rawfolder/(imgname+dzstring) # create overall folder for zstack
+            stackfolder.mkdir(parents=True, exist_ok=True)
+            
+            Nplanes = imgentry["dims"][2]
+            for plane in np.arange(Nplanes):
+                
+                img = imghandler.get_frame(z=plane, t=0, c=0)
+                img_np = np.array(img)                
+                
+                planepath = stackfolder/f"{imgname}-{plane:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
+                self.save_single_tif(img_np,planepath, resolution_mpp)      
         
     def get_image_overview(self):
         """
@@ -647,6 +670,7 @@ class lif_summary:
     def plot_scalebar(self, input_image, microns_per_pixel, image_name = None):
         """
             plots scalebar + title onto image if desired
+            scalebar is only plotted if image width > 800 px
             image input: np array
         """
         
