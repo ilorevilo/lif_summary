@@ -22,7 +22,7 @@ from xml.dom import minidom
 
 #from skimage.viewer import ImageViewer
 from skimage import exposure
-import skimage
+import skimage.io
 import PIL
 from PIL import ImageDraw, ImageFont, Image
 
@@ -51,21 +51,19 @@ class lif_summary:
         
         # abspath = self.lif_file.absolute()
         
-        self.filename = self.lif_path.name
+        self.filename = self.lif_path.stem
+        self.filename_full = self.lif_path.name
+        self.outdir = self.lif_path.parent/self.filename
         
-        print("importing file", self.filename)
+        print("importing file", self.filename_full)
         
         self.lifhandler = LifFile(self.lif_path)
         
+        # specify categories under which images "series" will get sorted later        
         self.grouped_img = {"xy":[], "xyc":[], "xyz":[], "xyt":[],"xyct":[],"envgraph":[],"other":[]}
         
         self._get_overview()
-        
         self._write_xml()
-        
-        #self.reader = bioformats.ImageReader(self.lif_file, perform_init=True)
-        #self.categorized_series = {"img_simple":[],"img_multiC":[],"img_multiT":[],"img_multiTC":[],"other":[],"z_stack":[]}
-        # specify categories under which images "series" will get sorted later
     
     def get_hist_boundaries(self, omeobject, image_name):
         """
@@ -106,12 +104,12 @@ class lif_summary:
 
         return resolution
 
-    def _build_query(self, imgentry, query=None):
+    def _build_query(self, imgentry, query=""):
         """
-            constructs cmd to query specified element, takes also care of subfoldlers
+            constructs cmd to query specified element, takes also care if element is in subfolder
+            imgentry = entry from img_list (=dict)
         """
-        # imgentry = entry from img_list
-        # procedure works, however a bit cumbersome... better to directly include in readlif
+        # procedure works, however a bit cumbersome... better to directly extract more param in readlif?
         
         path = imgentry["path"] # subfolders are nested here: projectname/subf1/subf2/
         sfolders = path.split("/")[1:-1] # split by / and take all except first and last
@@ -121,33 +119,33 @@ class lif_summary:
         for sfolder in sfolders:
             elquery = elquery + f'/Element[@Name="{sfolder}"]/Children' # build query of all subfolders
             
-        elquery = elquery + f'/Element[@Name="{name}"]' # query for element with specified name
+        elquery = elquery + f'/Element[@Name="{name}"]' # attach query for element with specified name
         query = elquery + query
         return query
 
     def _query_hist(self, imgentry):
         """
             reads out BlackValue and WhiteValue for specific imgentry
-            take care, multichannel not implemented yet
+            take care, multichannel not implemented yet, will return values of first found entry
         """
         query = self._build_query(imgentry, "/Data/Image/Attachment/ChannelScalingInfo")
         
         rootel = self.lifhandler.xml_root
-        blackval = rootel.find(query).attrib["BlackValue"]
-        whiteval = rootel.find(query).attrib["WhiteValue"]
+        blackval = float(rootel.find(query).attrib["BlackValue"])
+        whiteval = float(rootel.find(query).attrib["WhiteValue"])
         
         return [blackval, whiteval]
-    
+        
     def _get_overview(self):
         """
             extracts information of stored images from metadata
-            fills dict self.grouped_img
+            fills dict self.grouped_img with dict for each imgentry
         """
         
         for idx, img in enumerate(self.lifhandler.image_list):
             
             print(img)
-            img["idx"] = idx
+            img["idx"] = idx # add index which is used to request frame
             
             if ('EnvironmentalGraph') in img["name"]:
                 self.grouped_img["envgraph"].append(img)
@@ -180,7 +178,7 @@ class lif_summary:
             if (Nz == 1 and NT > 1 and NC==1):
                 print("entry is xyt")
             
-                img["fps"] = img["scale"][3]*10**6
+                img["fps"] = img["scale"][3]
                 self.grouped_img["xyt"].append(img)
                 continue
                 
@@ -188,7 +186,7 @@ class lif_summary:
             if (Nz ==1 and NT > 1 and NC>1):
                 print("entry is xyct")
             
-                img["fps"] = img["scale"][3]*10**6
+                img["fps"] = img["scale"][3]
                 self.grouped_img["xyct"].append(img)
                 continue                           
                 
@@ -201,23 +199,70 @@ class lif_summary:
             
             for img in imglist:
                 black_val, white_val = self._query_hist(img)
-                img["black_val"] = black_val
-                img["white_val"] = white_val
+                img["Blackval"] = black_val
+                img["Whiteval"] = white_val
     
     def _write_xml(self):
         """
             writes metadata of lif-file in pretty xml
         """
 
-        #todo: change outputfolder
         xmlstr = minidom.parseString(ET.tostring(self.lifhandler.xml_root)).toprettyxml(indent="   ")
         
-        fname = self.lif_path.stem + "_meta.xml"
+        fname = self.outdir/(self.filename + "_meta.xml")
         with open(fname, "w") as f:
             f.write(xmlstr)        
         #https://stackoverflow.com/questions/56682486/xml-etree-elementtree-element-object-has-no-attribute-write
         
+    def export_xy(self):
+        """
+            exports all xy image entries:
+            - raw export: tif 
+            - compressed export (jpg, scaled to blackval/whiteval which was set during acquisition 
+                with burned in title + scale bar)
+        """
+        
+        #### raw export folder
+        rawfolder = self.outdir/"Images_xy"/"raw"
+        rawfolder.mkdir(parents=True, exist_ok=True)
+        #### compressed jpg export folder
+        compfolder = self.outdir/"Images_xy"/"compressed"
+        compfolder.mkdir(parents=True, exist_ok=True)          
+        
+        # iterate all images
+        for imgentry in self.grouped_img["xy"]:
+            
+            img_idx = imgentry["idx"]
+            img_name = imgentry["name"]
+            """
+            # option to concatenate subfolders into filename
+            path = imgentry["path"] # subfolders are nested here: projectname/subf1/subf2/
+            sfolders = path.split("/")[1:-1] # split by / and take all except first and last
+            sfolders.append(img_name)
+            img_name = ("_".join(sfolders))
+            """
+            
+            imghandler = self.lifhandler.get_image(img_idx)
+            img = imghandler.get_frame(z=0, t=0, c=0)
+            img_np = np.array(img)
 
+            resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
+            
+            imgpath = rawfolder/(img_name+".tif")
+            self.save_single_tif(img_np, imgpath, resolution_mpp)
+            
+            # compressed export:
+            # scale images to 8bit, add scalebar + title, save as jpg in orig resolution
+            bit_resolution = imgentry["bit_depth"][0]
+            img_scale = 2**bit_resolution - 1
+            
+            image_adj_contrast = self.adj_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
+            image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
+            
+            labeled_image = self.plot_scalebar(image_8, resolution_mpp, img_name)
+            
+            imgpath_jpg = compfolder/(img_name+".jpg")
+            skimage.io.imsave(imgpath_jpg, labeled_image)
         
     def get_image_overview(self):
         """
@@ -378,11 +423,12 @@ class lif_summary:
             
     def save_single_tif(self, image, path, resolution_mpp, photometric = None):
         """
-            saves single tif into specified folder with specified meta
+            saves single imagej-tif into specified folder
+            uses resolution_mpp to indicate resolution in x and y dimensions in microns per pixel
         """
-        resolution_ppm = 1/resolution_mpp# convert micron per pixel to pixel per micron
+        resolution_ppm = 1/resolution_mpp # convert micron per pixel to pixel per micron
         if photometric == None:
-            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata={'unit': 'um'}) #what if ppm is different in x and y? #0.6149
+            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata={'unit': 'um'}) #what if ppm is different in x and y?
         else:
             tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata={'unit': 'um'}, photometric = photometric)
         
@@ -518,6 +564,27 @@ class lif_summary:
         """
             adusts contrast of inputimage either by setting to specified values or by calculating the 98% range
         """
+        
+        # check first if contrast is somehow alright
+        
+        # check spanwidth of image vs. spanwidth of defined interval
+        # if rangespan small -> low contrast
+        # rangespan can also be alright but values shifted -> over/ underxposure
+        # -> check both
+        imglimits = np.percentile(image, [5, 95])
+        rangespan = (imglimits[1] - imglimits[0]) / (vmax - vmin) 
+        
+        # check fraction of px outside defined interval (max. 1 = all)
+        # outside px are over/underexposed
+        px_outside = ((image < vmin) | (image > vmax)).sum()/ image.size
+        if ((px_outside > 0.2) or (rangespan < 0.2)):
+            print("extracted histogram scaling (blackval/ whiteval) would " 
+                "correspond to an over/underexposure of > 20 % of the image "
+                "or the image would span < 20 % of chosen range"
+                "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
+            #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
+            vmin, vmax = None, None
+        
         if None in (vmin, vmax):
             vmin = np.percentile(image, 0.2)
             vmax = np.percentile(image, 99.8)
@@ -660,11 +727,13 @@ class lif_summary:
             
             image = self.get_image_array(c=0, z=0, t=0, series = series_nr)
             bit_resolution = imagentry["bit_resolution"]
-            image_scale = 2**bit_resolution - 1
+            img_scale = 2**bit_resolution - 1
             
             #image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"], imagentry["Whiteval"])
-            image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"]*image_scale, imagentry["Whiteval"]*image_scale)
-            image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/65535.0))
+            image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"]*img_scale, imagentry["Whiteval"]*img_scale)
+            #image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/65535.0))
+            print(image_adj_contrast.max)
+            image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
             
             labeled_image = self.plot_scalebar(image_8, resolution_mpp, series_name)
             
