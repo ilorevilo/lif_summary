@@ -5,35 +5,30 @@
   
 """
 
-import sys
-
-import matplotlib.pyplot as plt
+#import sys
 #from pptx import Presentation
 #from pptx.util import Inches, Pt
 #from pptx.dml.color import RGBColor
+from itertools import zip_longest
 
 import numpy as np
-
 from readlif.reader import LifFile
 
 from xml.etree import ElementTree as ET
-from xml import etree as et
+#from xml import etree as et
 from xml.dom import minidom
 
 #from skimage.viewer import ImageViewer
 from skimage import exposure
 import skimage.io
-import PIL
+#import PIL
 from PIL import ImageDraw, ImageFont, Image
 
 import cv2
 
-from itertools import zip_longest
-
 import glob
 import os
 from pathlib import Path
-
 
 import tifffile
 import logging
@@ -41,7 +36,6 @@ import subprocess as sp
 import shlex
 import time
 
-import os
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg-imageio")
 #IMAGEMAGICK_BINARY = os.getenv("IMAGEMAGICK_BINARY", "auto-detect")
 if FFMPEG_BINARY == "ffmpeg-imageio":
@@ -59,9 +53,6 @@ class lif_summary:
             just specify path to lif-file in constructor
         """
         self.lif_path = Path(lif_file)
-        #self.filename = os.path.splitext(self.lif_file)[0]
-        
-        # abspath = self.lif_file.absolute()
         
         self.filename = self.lif_path.stem
         self.filename_full = self.lif_path.name
@@ -277,6 +268,7 @@ class lif_summary:
             self._log_img(imgentry)
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
+            print(f"exporting image {img_name} with meta: \n {imgentry}")
             """
             # option to concatenate subfolders into filename
             path = imgentry["path"] # subfolders are nested here: projectname/subf1/subf2/
@@ -299,10 +291,12 @@ class lif_summary:
             bit_resolution = imgentry["bit_depth"][0]
             img_scale = 2**bit_resolution - 1
             
-            image_adj_contrast = self.adj_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
-            image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
+            # image_adj_contrast = self.adj_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
+            vmin, vmax = self.check_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
+            image_adj_contrast = exposure.rescale_intensity(img_np, in_range=(vmin, vmax)) # stretch min/max
+            img_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
             
-            labeled_image = self.plot_scalebar(image_8, resolution_mpp, img_name)
+            labeled_image = self.plot_scalebar(img_8, resolution_mpp, img_name)
             
             imgpath_jpg = compfolder/(img_name+".jpg")
             skimage.io.imsave(imgpath_jpg, labeled_image)
@@ -323,7 +317,8 @@ class lif_summary:
             self._log_img(imgentry)
             resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
             img_idx = imgentry["idx"]
-            imgname = imgentry["name"]
+            img_name = imgentry["name"]
+            print(f"exporting zstack {img_name} with meta: \n {imgentry}")
             imghandler = self.lifhandler.get_image(img_idx)   
             
             # get correct z-spacing dz
@@ -334,7 +329,7 @@ class lif_summary:
             dz = total_z/(Nz-1)
             
             dzstring = f"-dz_{dz:.2f}_um".replace(".","_") # write plane spacing into foldername such that it's easily accessible
-            stackfolder = rawfolder/(imgname+dzstring) # create overall folder for zstack
+            stackfolder = rawfolder/(img_name+dzstring) # create overall folder for zstack
             stackfolder.mkdir(parents=True, exist_ok=True)
             
             Nplanes = imgentry["dims"][2]
@@ -343,7 +338,7 @@ class lif_summary:
                 img = imghandler.get_frame(z=plane, t=0, c=0)
                 img_np = np.array(img)                
                 
-                planepath = stackfolder/f"{imgname}-{plane:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
+                planepath = stackfolder/f"{img_name}-{plane:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
                 self.save_single_tif(img_np,planepath, resolution_mpp)      
         
     def export_xyc(self):
@@ -364,7 +359,7 @@ class lif_summary:
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
             imgpath = rawfolder/(img_name+".tif")
-            #NC = imgentry["channels"]
+            print(f"exporting multichannel {img_name} with meta: \n {imgentry}")
 
             
             imghandler = self.lifhandler.get_image(img_idx)
@@ -407,15 +402,15 @@ class lif_summary:
             scalingfactor = float(Nmax_sm)/Nlong
             if scalingfactor > 1.0: # don't allow upscaling
                 scalingfactor = 1.0
-            print("scaling", scalingfactor)
+            #print("scaling", scalingfactor)
             Nx_sm, Ny_sm = int(Nx*scalingfactor), int(Ny*scalingfactor)
-            print(Nx_sm, Ny_sm)
 
             scalebar = self.create_scalebar(Nx_sm,resolution_mpp/scalingfactor) #create scalebar for small vid
             scale_width_px = scalebar.shape[0]
             scale_height_px = scalebar.shape[1]
             
-            print(f"exporting video {img_name} with meta: \n {imgentry}")                             
+            print(f"exporting video {img_name} with meta: \n {imgentry}")   
+            print("resolution of small video:", Nx_sm, Ny_sm)            
             imghandler = self.lifhandler.get_image(img_idx)
 
             # export of both vids simultaneously, get infos to start ffmpeg subprocess
@@ -818,42 +813,6 @@ class lif_summary:
 
         return vmin, vmax
         
-    
-    # todo: split into check_contrast and rescale_img (or don't use rescale_img as it's a direct call to exposure module)
-    def adj_contrast(self, image, vmin=None, vmax=None):
-        """
-            adusts contrast of inputimage either by setting to specified values or by calculating the 98% range
-        """
-        
-        # check first if contrast is somehow alright
-        
-        # check spanwidth of image vs. spanwidth of defined interval
-        # if rangespan small -> low contrast
-        # rangespan can also be alright but values shifted -> over/ underxposure
-        # -> check both
-        imglimits = np.percentile(image, [5, 95])
-        rangespan = (imglimits[1] - imglimits[0]) / (vmax - vmin) 
-        
-        # check fraction of px outside defined interval (max. 1 = all)
-        # outside px are over/underexposed
-        px_outside = ((image < vmin) | (image > vmax)).sum()/ image.size
-        if ((px_outside > 0.2) or (rangespan < 0.2)):
-            print("extracted histogram scaling (blackval/ whiteval) would " 
-                "correspond to an over/underexposure of > 20 % of the image "
-                "or the image would span < 20 % of chosen range"
-                "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
-            #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
-            vmin, vmax = None, None
-        
-        if None in (vmin, vmax):
-            vmin = np.percentile(image, 0.2)
-            vmax = np.percentile(image, 99.8)
-                
-        #print("adjusting contrast to: ", vmin, vmax)
-        img_adj_contrast = exposure.rescale_intensity(image, in_range=(vmin, vmax))
-        
-        return img_adj_contrast
-
     def create_scalebar(self, dimX_px, microns_per_pixel):
         """
             creates scalebar as np array which then can be transferred to image
@@ -894,7 +853,8 @@ class lif_summary:
             image input: np array
         """
         
-        image_scalebar = PIL.Image.fromarray(input_image)   #np.uint8(input_image*255)
+        image_scalebar = Image.fromarray(input_image) # Image is PIL.Image
+        #np.uint8(input_image*255)
         
         dimX_px = input_image.shape[1]
         dimY_px = input_image.shape[0]
