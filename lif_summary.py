@@ -39,6 +39,7 @@ import tifffile
 import logging
 import subprocess as sp
 import shlex
+import time
 
 import os
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg-imageio")
@@ -282,7 +283,7 @@ class lif_summary:
             sfolders = path.split("/")[1:-1] # split by / and take all except first and last
             sfolders.append(img_name)
             img_name = ("_".join(sfolders))
-            """
+            """        
             
             imghandler = self.lifhandler.get_image(img_idx)
             img = imghandler.get_frame(z=0, t=0, c=0)
@@ -389,17 +390,73 @@ class lif_summary:
 
         # iterate all entries
         for imgentry in self.grouped_img["xyt"]:
+       
             self._log_img(imgentry)
-            resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
+            resolution_mpp = 1.0/imgentry["scale_n"][1]
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
             fps = imgentry['fps']
-            imgpath = lgfolder/(img_name+"_lg.mp4")        
-        
-            imghandler = self.lifhandler.get_image(img_idx)
+            Nx, Ny = imgentry["dims"][0], imgentry["dims"][1]
+            Nmax_sm = 1024 # longest side of small video
+            codec_lg, codec_sm = 'libx264', 'libx264'
+            crf_lg, crf_sm = 17, 23
+
+            #rescale smaller video such that longest side = 1024
+            # prevent upscaling
+            Nlong = max(Nx, Ny)
+            scalingfactor = float(Nmax_sm)/Nlong
+            if scalingfactor > 1.0: # don't allow upscaling
+                scalingfactor = 1.0
+            print("scaling", scalingfactor)
+            Nx_sm, Ny_sm = int(Nx*scalingfactor), int(Ny*scalingfactor)
+            print(Nx_sm, Ny_sm)
+
+            scalebar = self.create_scalebar(Nx_sm,resolution_mpp/scalingfactor) #create scalebar for small vid
+            scale_width_px = scalebar.shape[0]
+            scale_height_px = scalebar.shape[1]
             
-            # process = sp.Popen(shlex.split('"' + FFMPEG_BINARY + '" -y -s 1024x1024 -pixel_format gray8 -f rawvideo -r ' + str(fps) + ' -i pipe: -vcodec libx265 -pix_fmt yuv420p -crf 24 out.mp4'), stdin=sp.PIPE)
-            process = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s 1024x1024 -pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec libx265 -pix_fmt yuv420p -crf 24 out.mp4'), stdin=sp.PIPE)
+            print(f"exporting video {img_name} with meta: \n {imgentry}")                             
+            imghandler = self.lifhandler.get_image(img_idx)
+
+            # export of both vids simultaneously, get infos to start ffmpeg subprocess
+            
+            resinfo_lg = f'resolution_xy={resolution_mpp:.6f}_mpp'.replace(".","_")
+            resinfo_sm = f'resolution_xy={resolution_mpp/scalingfactor:.6f}_mpp'.replace(".","_") # correct by scalingfactor
+            # stores resolution info in metadata (in category comment) for quick access from videofile
+            path_lg = str(lgfolder/(img_name+"_lg.mp4")) # string needed for input to ffmpeg cmd
+            path_sm = str(smfolder/(img_name+"_sm.mp4")) # string needed for input to ffmpeg cmd        
+            sizestring_lg = f'{Nx}x{Ny}' # e.g. 1024x1024, xsize x ysize, todo: check if order correct
+            sizestring_sm = f'{Nx_sm}x{Ny_sm}'
+
+            startt = time.time() #for quick check of exporttimes
+            
+            # write video via pipe to ffmpeg-stream, start process here
+            # solution from https://stackoverflow.com/questions/61260182/how-to-output-x265-compressed-video-with-cv2-videowriter
+            process_lg = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_lg} '
+                f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_lg} '
+                f'-pix_fmt yuv420p -crf {crf_lg} -metadata comment="{resinfo_lg}" "{path_lg}"'), stdin=sp.PIPE)
+             
+            # directly create process for export of smaller vid -> img has to be pulled only once
+            process_sm = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_sm} '
+                f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_sm} '
+                f'-pix_fmt yuv420p -crf {crf_sm} -metadata comment="{resinfo_sm}" "{path_sm}"'), stdin=sp.PIPE)
+            
+            # check correct exposure scaling on one frame (image at half videolength)
+            # save frame also as tif in full res for later access
+            Nmean = int(imgentry["dims"][3]/2) - 1# idx of mean frame ~ at half of Nframes
+            mimg = imghandler.get_frame(z=0, t=Nmean, c=0)
+            img_np = np.array(mimg)
+            
+            bit_resolution = imgentry["bit_depth"][0]
+            img_scale = 2**bit_resolution - 1               
+            vmin, vmax = self.check_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)   
+            vmin8, vmax8 = vmin*(255.0/img_scale), vmax*(255.0/img_scale) # adjust to 8bit
+            
+            # save single tiff in full size
+            stillpath = self.outdir/"Videos"/"tifstills"
+            stillpath.mkdir(parents=True, exist_ok=True)
+            self.save_single_tif(img_np, stillpath/(img_name+".tif"), resolution_mpp)            
+            
             # kwarg info:
             # -y: overwrite wo. asking
             # -s: size
@@ -409,19 +466,21 @@ class lif_summary:
             # -i: pipe
             for frame in imghandler.get_iter_t(c=0, z=0):
                 img_np = np.array(frame)
-                print(img_np.shape, img_np.max())
-
-                bit_resolution = imgentry["bit_depth"][0]
-                img_scale = 2**bit_resolution - 1   
+                img8 = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale)) # scale to 8bit range
+                img_scaled = exposure.rescale_intensity(img8, in_range=(vmin8, vmax8)) # stretch min/max
                 
-                expframe = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale))
-                expframe = cv2.resize(expframe, (1024,1024))
-                print(expframe.shape, expframe.max())
-                process.stdin.write(expframe.tobytes())
+                img_sm = cv2.resize(img_scaled, (Nx_sm,Ny_sm)) # scale down small vid
+                img_sm[-1-scale_width_px:-1,-1-scale_height_px:-1] = scalebar # add scalebar
+                
+                process_lg.stdin.write(img_scaled.tobytes())
+                process_sm.stdin.write(img_sm.tobytes())
+                
+            for process in [process_lg, process_sm]:
+                process.stdin.close()
+                process.wait()
+                process.terminate()
             
-            process.stdin.close()
-            process.wait()
-            process.terminate()
+            print("video export finished in", time.time()-startt, "s")
         
     def get_image_overview(self):
         """
@@ -581,7 +640,7 @@ class lif_summary:
             return True
             
     # def save_single_tif(self, image, path, resolution_mpp, photometric = None, append_meta = {}):
-    def save_single_tif(self, image, path, resolution_mpp, photometric = None):
+    def save_single_tif(self, image, path, resolution_mpp, photometric = None, compress = None):
         """
             saves single imagej-tif into specified folder
             uses resolution_mpp to indicate resolution in x and y dimensions in microns per pixel
@@ -591,9 +650,11 @@ class lif_summary:
         metadata = {'unit': 'um'}
         
         if photometric == None:
-            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata=metadata) #what if ppm is different in x and y?
+            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), 
+            metadata=metadata, compress = compress) #what if ppm is different in x and y?
         else:
-            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata=metadata, photometric = photometric)
+            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), 
+            metadata=metadata, photometric = photometric, compress = compress)
 
     def get_image_array(self, c, z, t, series):
         """
@@ -722,8 +783,43 @@ class lif_summary:
                 #outputpath = os.path.join(self.filename,"raw tifs","videos", series_name, series_name+"-{:04d}.tif".format(frame))            
                 planepath = os.path.join(outputpath, series_name+"-{:04d}.tif".format(plane))
                 image = self.get_image_array(c=0, z=plane, t=0, series = series_nr)
-                self.save_single_tif(image,planepath, resolution_mpp)            
+                self.save_single_tif(image,planepath, resolution_mpp)           
     
+    def check_contrast(self, image, vmin=None, vmax =None):
+        """
+            checks if desired scaling range between vmin and vmax yields to a reasonable
+            intensity range (< 20 % of image over/underexposed, image spans > 20 % of range)
+            adjusts vmin and vmax to 0.2 - 99.8 percentile if not
+        """
+        
+        # check first if contrast is somehow alright
+        
+        # check spanwidth of image vs. spanwidth of defined interval
+        # if rangespan small -> low contrast
+        # rangespan can also be alright but values shifted -> over/ underxposure
+        # -> check both
+        imglimits = np.percentile(image, [5, 95])
+        rangespan = (imglimits[1] - imglimits[0]) / (vmax - vmin) 
+        
+        # check fraction of px outside defined interval (max. 1 = all)
+        # outside px are over/underexposed
+        px_outside = ((image < vmin) | (image > vmax)).sum()/ image.size
+        if ((px_outside > 0.2) or (rangespan < 0.2)):
+            print("extracted histogram scaling (blackval/ whiteval) would " 
+                "correspond to an over/underexposure of > 20 % of the image "
+                "or the image would span < 20 % of chosen range"
+                "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
+            #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
+            vmin, vmax = None, None
+        
+        if None in (vmin, vmax):
+            vmin = np.percentile(image, 0.2)
+            vmax = np.percentile(image, 99.8)      
+
+        return vmin, vmax
+        
+    
+    # todo: split into check_contrast and rescale_img (or don't use rescale_img as it's a direct call to exposure module)
     def adj_contrast(self, image, vmin=None, vmax=None):
         """
             adusts contrast of inputimage either by setting to specified values or by calculating the 98% range
