@@ -36,6 +36,17 @@ from pathlib import Path
 
 
 import tifffile
+import logging
+import subprocess as sp
+import shlex
+
+import os
+FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg-imageio")
+#IMAGEMAGICK_BINARY = os.getenv("IMAGEMAGICK_BINARY", "auto-detect")
+if FFMPEG_BINARY == "ffmpeg-imageio":
+    from imageio.plugins.ffmpeg import get_exe
+
+    FFMPEG_BINARY = get_exe()
 
 class lif_summary:
     """
@@ -53,7 +64,7 @@ class lif_summary:
         
         self.filename = self.lif_path.stem
         self.filename_full = self.lif_path.name
-        self.outdir = self.lif_path.parent/self.filename       
+        self.outdir = self.lif_path.parent/self.filename      
         
         print("importing file", self.filename_full)
         
@@ -63,6 +74,10 @@ class lif_summary:
         self.grouped_img = {"xy":[], "xyc":[], "xyz":[], "xyt":[],"xyct":[],"envgraph":[],"other":[]}
 
         self.outdir.mkdir(parents=True, exist_ok=True)
+        
+        logging.shutdown() #clear old logger
+        logging.getLogger().handlers.clear()
+        logging.basicConfig(filename=self.outdir/(self.filename+'_extractlog.log'), filemode='w', level=logging.DEBUG, format='%(message)s')
         
         self._get_overview()
         self._write_xml()
@@ -137,7 +152,29 @@ class lif_summary:
         whiteval = float(rootel.find(query).attrib["WhiteValue"])
         
         return [blackval, whiteval]
+    
+    def _query_chan(self, imgentry):
+        """
+            reads out used contrast method + filter cube for specific imgentry
+            returns as list where each item corresponds to channel
+        """
+
+        cquery = self._build_query(imgentry,"Data/Image/Attachment/"
+            "ATLCameraSettingDefinition/WideFieldChannelConfigurator/WideFieldChannelInfo")
+        rootel = self.lifhandler.xml_root 
+        chan_els = rootel.findall(cquery)
+        chaninfo = [chan_el.attrib["ContrastingMethodName"] + "_" + chan_el.attrib["FluoCubeName"] for chan_el in chan_els]            
         
+        return chaninfo
+    
+    def _log_img(self,imgentry):
+        """
+            logs currently exported imagentry
+        """
+        logging.warning(f"########## exporting entry {imgentry['idx']} ##########")
+        for entry in ["name", "path", "bit_depth", "dims", "scale", "channels", "chaninfo"]:
+            logging.warning(f'{entry}: %s', imgentry[entry])
+    
     def _get_overview(self):
         """
             extracts information of stored images from metadata
@@ -148,11 +185,13 @@ class lif_summary:
             
             print(img)
             img["idx"] = idx # add index which is used to request frame
+            img["chaninfo"] = self._query_chan(img)
             
             if ('EnvironmentalGraph') in img["name"]:
                 self.grouped_img["envgraph"].append(img)
                 continue
             
+            # check various dimensions to sort entries accordingly
             dimtuple = img["dims"]
             Nx, Ny, Nz, NT = dimtuple[0], dimtuple[1], dimtuple[2], dimtuple[3]
              # dimension tuple must be indexed with int, 0:x, 1:y, 2:z, 3:t, 4:m mosaic tile
@@ -234,6 +273,7 @@ class lif_summary:
         # iterate all images
         for imgentry in self.grouped_img["xy"]:
             
+            self._log_img(imgentry)
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
             """
@@ -279,6 +319,7 @@ class lif_summary:
         # iterate all images
         for imgentry in self.grouped_img["xyz"]:
 
+            self._log_img(imgentry)
             resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
             img_idx = imgentry["idx"]
             imgname = imgentry["name"]
@@ -303,6 +344,84 @@ class lif_summary:
                 
                 planepath = stackfolder/f"{imgname}-{plane:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
                 self.save_single_tif(img_np,planepath, resolution_mpp)      
+        
+    def export_xyc(self):
+        """
+            exports all xyc image entries (=multichannel images)
+            - raw export: tif 
+            - compressed export: none            
+        """
+        #### raw export folder
+        rawfolder = self.outdir/"Images_xyc"
+        rawfolder.mkdir(parents=True, exist_ok=True)        
+
+        # iterate all images
+        for imgentry in self.grouped_img["xyc"]:
+            
+            self._log_img(imgentry)
+            resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
+            img_idx = imgentry["idx"]
+            img_name = imgentry["name"]
+            imgpath = rawfolder/(img_name+".tif")
+            #NC = imgentry["channels"]
+
+            
+            imghandler = self.lifhandler.get_image(img_idx)
+            channel_list = [np.array(img) for img in imghandler.get_iter_c(t=0, z=0)]
+
+            img_xyc = np.array(channel_list)
+            self.save_single_tif(img_xyc, imgpath, resolution_mpp, photometric = 'minisblack')            
+
+    def export_xyt(self):
+        """
+            exports all xyt image entries (=video/ timelapse entries)
+            directly pipes frames to ffmpeg
+            - large export: .mp4 in full resolution, low compression
+            - small export: .mp4, longest side scaled to 1024, include scalebar          
+        """
+        
+        #### hq export folder
+        lgfolder = self.outdir/"Videos"/"lg"
+        lgfolder.mkdir(parents=True, exist_ok=True)
+        #### compressed jpg export folder
+        smfolder = self.outdir/"Videos"/"sm"
+        smfolder.mkdir(parents=True, exist_ok=True)
+
+        # iterate all entries
+        for imgentry in self.grouped_img["xyt"]:
+            self._log_img(imgentry)
+            resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
+            img_idx = imgentry["idx"]
+            img_name = imgentry["name"]
+            fps = imgentry['fps']
+            imgpath = lgfolder/(img_name+"_lg.mp4")        
+        
+            imghandler = self.lifhandler.get_image(img_idx)
+            
+            # process = sp.Popen(shlex.split('"' + FFMPEG_BINARY + '" -y -s 1024x1024 -pixel_format gray8 -f rawvideo -r ' + str(fps) + ' -i pipe: -vcodec libx265 -pix_fmt yuv420p -crf 24 out.mp4'), stdin=sp.PIPE)
+            process = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s 1024x1024 -pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec libx265 -pix_fmt yuv420p -crf 24 out.mp4'), stdin=sp.PIPE)
+            # kwarg info:
+            # -y: overwrite wo. asking
+            # -s: size
+            # -pixel_format: bgr24 was set... use gray8 for 8bit grayscale
+            # -f: "Force input or output file format. -> here set to raw stream"
+            # -r: framerate, can be used for input and output stream, here only input specified -> output will be same
+            # -i: pipe
+            for frame in imghandler.get_iter_t(c=0, z=0):
+                img_np = np.array(frame)
+                print(img_np.shape, img_np.max())
+
+                bit_resolution = imgentry["bit_depth"][0]
+                img_scale = 2**bit_resolution - 1   
+                
+                expframe = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale))
+                expframe = cv2.resize(expframe, (1024,1024))
+                print(expframe.shape, expframe.max())
+                process.stdin.write(expframe.tobytes())
+            
+            process.stdin.close()
+            process.wait()
+            process.terminate()
         
     def get_image_overview(self):
         """
@@ -461,17 +580,20 @@ class lif_summary:
             
             return True
             
+    # def save_single_tif(self, image, path, resolution_mpp, photometric = None, append_meta = {}):
     def save_single_tif(self, image, path, resolution_mpp, photometric = None):
         """
             saves single imagej-tif into specified folder
             uses resolution_mpp to indicate resolution in x and y dimensions in microns per pixel
         """
+                
         resolution_ppm = 1/resolution_mpp # convert micron per pixel to pixel per micron
-        if photometric == None:
-            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata={'unit': 'um'}) #what if ppm is different in x and y?
-        else:
-            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata={'unit': 'um'}, photometric = photometric)
+        metadata = {'unit': 'um'}
         
+        if photometric == None:
+            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata=metadata) #what if ppm is different in x and y?
+        else:
+            tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), metadata=metadata, photometric = photometric)
 
     def get_image_array(self, c, z, t, series):
         """
@@ -569,6 +691,8 @@ class lif_summary:
             resolution_mpp = imagentry["mpp"]
             totalchannels = imagentry['SizeC']
             outputpath = os.path.join(self.filename,"raw tifs","multichannel images",series_name+".tif")
+            
+
             
             image = self.get_image_array(c= None, z=0, t=0, series = series_nr)
             image = np.moveaxis(image,2,0)  #exchange dimensions
@@ -916,9 +1040,7 @@ class lif_summary:
         
 def main():
     """
-    javabridge.start_vm(class_path=bioformats.JARS, max_heap_size='8G')
-    # issues in ipython... start manually there
-    
+
     inputlifs = glob.glob("*.lif") # get all .lif-files in current folder
     #inputlifs = [inputfile]    # if you just want to read one file
     
@@ -930,8 +1052,6 @@ def main():
             new_summary.export_compressed_data()
             new_summary.create_ppt_summary()
         new_summary.close()
-    
-    javabridge.kill_vm()
     
     # move files into newly created folders when finished
     for inputfile in inputlifs:
