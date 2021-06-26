@@ -73,45 +73,6 @@ class lif_summary:
         
         self._get_overview()
         self._write_xml()
-    
-    def get_hist_boundaries(self, omeobject, image_name):
-        """
-            extracts histogram boundaries, stored in omeobject
-        """
-        rootnode = omeobject.dom.getroot()
-        root_iter = rootnode.iter()
-
-        white_val, black_val = 0, 0
-
-        for child in root_iter:
-            if child.text == image_name + ' Image|ChannelScalingInfo|WhiteValue':
-                # white_val = root_iter.next().text
-                white_val = next(root_iter).text    #changed for Python 3
-                break
-
-        root_iter = rootnode.iter()
-
-        for child in root_iter:
-            if child.text == image_name + ' Image|ChannelScalingInfo|BlackValue':
-                black_val = next(root_iter).text
-                break
-        return black_val, white_val	
-
-    def get_bit_resolution(self, omeobject, image_name):
-        """
-            extracts bit resolution, stored in omeobject
-        """
-        rootnode = omeobject.dom.getroot()
-        root_iter = rootnode.iter()
-
-        resolution = 0
-
-        for child in root_iter:
-            if child.text == image_name + ' Image|ChannelDescription|Resolution':
-                resolution = next(root_iter).text
-                break
-
-        return resolution
 
     def _build_query(self, imgentry, query=""):
         """
@@ -161,7 +122,7 @@ class lif_summary:
     
     def _log_img(self,imgentry):
         """
-            logs currently exported imagentry
+            logs currently exported imagentry to logfile
         """
         logging.warning(f"########## exporting entry {imgentry['idx']} ##########")
         for entry in ["name", "path", "bit_depth", "dims", "scale", "channels", "chaninfo"]:
@@ -175,7 +136,7 @@ class lif_summary:
         
         for idx, img in enumerate(self.lifhandler.image_list):
             
-            print(img)
+            # print(img)
             img["idx"] = idx # add index which is used to request frame
             img["chaninfo"] = self._query_chan(img)
             
@@ -476,165 +437,7 @@ class lif_summary:
                 process.terminate()
             
             print("video export finished in", time.time()-startt, "s")
-        
-    def get_image_overview(self):
-        """
-            fills categorized_series dict with correct entries from lif-file
-            basically: connect image name/type to id
-        """
-            
-        metadata = bioformats.get_omexml_metadata(self.lif_file)
-        metadata = metadata.encode('utf8')
-        metadata = metadata.decode('utf8')    #here decode for string...    #needed?
-        ome = bioformats.OMEXML(metadata)
-        
-        image_count = ome.image_count
-        print ("------------------------------")
-        print ("reading file", self.filename)
-        print ("number of image-series in lif-file: " + str(image_count))
-            
-        for image_nr in range(image_count):
-            iome = ome.image(image_nr)    #iome: current image, loop through all images
-            
-            """ tries to extract metadata
-            #origmeta = {}
-            #ome_origmeta= ome.OriginalMetadata(origmeta)#does not need dict, class is inherited from dict
-            #print(ome_origmeta)
-            
-            #structannot = ome.StructuredAnnotations    #(image_nr) # use property...
-            #not working?
-            
-            #plane = ome.plane()
-            #print(iome.Pixels.Plane().DeltaT)   #specify nr of plane
 
-            #structannot.keys()
-            #structannot.iter_original_metadata()
-            """
-            
-            # create dict with information of current series
-            new_imagentry = {}
-                    
-            new_imagentry['name'] = iome.get_Name()
-            new_imagentry['id'] = iome.get_ID()
-            new_imagentry['nr'] = image_nr
-            new_imagentry['mpp'] = iome.Pixels.PhysicalSizeX # is returned in mpp
-            
-            new_imagentry['SizeX'] = iome.Pixels.get_SizeX()
-            new_imagentry['SizeT'] = iome.Pixels.get_SizeT()
-            new_imagentry['SizeZ'] = iome.Pixels.get_SizeZ()
-            new_imagentry['SizeC'] = iome.Pixels.get_SizeC()
-            
-            black_val, white_val = self.get_hist_boundaries(ome,iome.get_Name())
-            new_imagentry['Blackval'] = float(black_val)
-            new_imagentry['Whiteval'] = float(white_val)
-            new_imagentry['bit_resolution'] = int(self.get_bit_resolution(ome, iome.get_Name()))
-            
-            print ("hist_ranges:")
-            print (black_val, white_val)
-            
-            new_imagentry['subfolder'] = None   #specify if images (like mark and find) are in a subfolder. currently only 1 level supported
-            
-            # calculate fps for videos, assumes evenly spaced frames
-            if new_imagentry['SizeT'] > 1:
-                last_plane = new_imagentry['SizeT']-1
-                new_imagentry['duration'] = iome.Pixels.Plane(last_plane).DeltaT
-                new_imagentry['fps'] = last_plane/new_imagentry['duration'] #calculate fps
-            
-            #print(new_imagentry)
-            ## sort dict according to entries
-            
-            # move z-stack to category z_stack
-            # todo in future: check for multichannel z-stacks
-            if new_imagentry['SizeZ'] > 1:
-                
-                if "/" in new_imagentry['name']:
-                    new_imagentry['name'] = new_imagentry['name'].split("/")[0]
-                    #new_imagentry['subfolder'] = new_imagentry['name'].split("/")[0]    # save folder name to create later
-                self.categorized_series["z_stack"].append(new_imagentry)
-            
-            
-            # move EnvironmentalGraph-files into category other
-            elif "EnvironmentalGraph" in new_imagentry["name"]:
-                self.categorized_series["other"].append(new_imagentry)
-            
-            # video
-            elif new_imagentry['SizeT'] > 1:
-                
-                #multichannel video
-                if new_imagentry['SizeC'] > 1:
-                    self.categorized_series["img_multiTC"].append(new_imagentry)
-                
-                #normal video
-                elif new_imagentry['SizeC'] == 1:
-                    
-                    if "Mark_and_Find" in new_imagentry["name"]:
-                        new_imagentry['subfolder'] = new_imagentry['name'].split("/")[0]# save folder name to create later
-                        new_imagentry['name'] = new_imagentry['name'].split("/")[1]
-                    else:
-                        new_imagentry['name'] = new_imagentry['name'].split("/")[0] #can cause issues if in subfolder
-                    self.categorized_series["img_multiT"].append(new_imagentry)
-                
-                #everything else
-                else:
-                    self.categorized_series["other"].append(new_imagentry)
-                
-            # no time variation
-            elif new_imagentry['SizeT'] == 1:
-                
-                #multichannel image
-                if new_imagentry['SizeC'] > 1:
-                    new_imagentry['name'] = new_imagentry['name'].split("/")[0] #can cause issues if in subfolder, quick fix
-                    
-                    if "EnvironmentalGraph" not in new_imagentry["name"]:
-                        self.categorized_series["img_multiC"].append(new_imagentry)
-                
-                #normal image
-                elif new_imagentry['SizeC'] == 1:
-                    
-                    if "Mark_and_Find" in new_imagentry["name"]:
-                        new_imagentry['subfolder'] = new_imagentry['name'].split("/")[0]# save folder name to create later
-                        #new_imagentry['name'] = new_imagentry['name'].split("/")[1]
-                    else:
-                        new_imagentry['name'] = new_imagentry['name'].split("/")[0] #can cause issues if in subfolder
-                    self.categorized_series["img_simple"].append(new_imagentry)
-                
-                #everything else
-                else:
-                    self.categorized_series["other"].append(new_imagentry)  
-            
-            else:
-                self.categorized_series["other"].append(new_imagentry)
-                
-    def create_output_folders(self):
-        """
-            creates output folder structure based on filename
-        """
-        
-        outputfolder = self.filename
-
-        #create folder with name of lif_file if it doesn't exist
-        if os.path.isdir(outputfolder):
-            print ("folder " + outputfolder + " already exists")
-            print ("don't create folder structure")
-            print ("don't export folders, quitting...")
-            
-            return False
-        else:
-            print ("create folder " + outputfolder)
-            print ("------------------------------")
-            os.makedirs(outputfolder)
-
-            os.makedirs(os.path.join(outputfolder,"raw tifs","images"))
-            os.makedirs(os.path.join(outputfolder,"raw tifs","videos"))
-            os.makedirs(os.path.join(outputfolder,"raw tifs","multichannel images"))
-            os.makedirs(os.path.join(outputfolder,"raw tifs","zstacks")) # do it smarter in future and just create folders if imagetypes exist...
-            os.makedirs(os.path.join(outputfolder,"compressed","images"))
-            os.makedirs(os.path.join(outputfolder,"compressed","videos"))
-            #os.makedirs(os.path.join(outputfolder,"compressed","multichannel images")) #does not work yet
-            
-            return True
-            
-    # def save_single_tif(self, image, path, resolution_mpp, photometric = None, append_meta = {}):
     def save_single_tif(self, image, path, resolution_mpp, photometric = None, compress = None):
         """
             saves single imagej-tif into specified folder
@@ -650,135 +453,6 @@ class lif_summary:
         else:
             tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), 
             metadata=metadata, photometric = photometric, compress = compress)
-
-    def get_image_array(self, c, z, t, series):
-        """
-            reads image via bioformats reader to np arary
-        """
-        image = self.reader.read(c=c, z=z, t=t, series=series, rescale=False)
-        
-        image[image < 0] = image[image < 0] + 65535 #weird results were happening here when 12 bit data was saved in 16 bit container?
-        image_uint = np.uint16(image)
-        return image_uint
-
-    def export_raw_tifs(self):
-        """
-            exports raw data saved in lif-file
-        """
-        
-        print("exporting raw tifs")
-        
-        # export simple images
-        total_images = len(self.categorized_series["img_simple"])
-        print("exporting " + str(total_images) + " simple images")
-
-        for nr, imagentry in enumerate(self.categorized_series["img_simple"]):
-            
-            self.printProgressBar(nr + 1, total_images, prefix = 'Progress:', suffix = 'Complete', length = 50)
-
-            series_nr = imagentry["nr"]
-            series_name = imagentry["name"]
-            resolution_mpp = imagentry["mpp"]
-            outputpath = os.path.join(self.filename,"raw tifs","images",series_name+".tif")
-            if imagentry["subfolder"] != None:
-                subfolder = os.path.join(self.filename,"raw tifs","images",imagentry["subfolder"])
-                if not os.path.exists(subfolder):
-                    os.makedirs(subfolder)
-            else:
-                subfolder = None
-            
-            image = self.get_image_array(c=0, z=0, t=0, series = series_nr)
-            
-            # create output folder if MarkAndFind?
-
-            self.save_single_tif(image, outputpath, resolution_mpp)
-
-        # export videos
-        total_videos = len(self.categorized_series["img_multiT"])
-        print("exporting " + str(total_videos) + " videos")
-        
-        for videonr, imagentry in enumerate(self.categorized_series["img_multiT"]):
-            series_name = imagentry["name"]
-            print("video", videonr)
-            print(series_name)
-            
-            subfolder = imagentry["subfolder"]
-
-            # create subfolder, depending on MarkAndFind
-            if subfolder != None:
-                outputpath = os.path.join(self.filename,"raw tifs","videos", subfolder, series_name)
-            else:
-                outputpath = os.path.join(self.filename,"raw tifs","videos", series_name)
-            
-            if not os.path.exists(outputpath):
-                    os.makedirs(outputpath)
-            
-            series_nr = imagentry["nr"]            
-            resolution_mpp = imagentry["mpp"]
-            totalframes = imagentry['SizeT']
-            
-            for frame in np.arange(totalframes):
-                self.printProgressBar(frame+1, totalframes, prefix = 'Progress:', suffix = 'Complete', length = 50)
-                
-                framepath = os.path.join(outputpath, series_name+"-{:04d}.tif".format(frame))
-                image = self.get_image_array(c=0, z=0, t=frame, series = series_nr)
-                self.save_single_tif(image,framepath, resolution_mpp)            
-            
-            bit_resolution = imagentry["bit_resolution"]
-            image_scale = 2**bit_resolution - 1
-            
-            # write dict with metainfos into videoinfos.txt
-            metafile = os.path.join(outputpath, "videoinfos.txt")
-            metadict = {'microns_per_pixel' : resolution_mpp, 'fps' : imagentry["fps"], 'Blackval':imagentry["Blackval"]*image_scale, 'Whiteval':imagentry["Whiteval"]*image_scale}
-            f = open(metafile,"w")
-            f.write( str(metadict) )
-            f.close()
-        
-        # export multichannel images
-        total_multiC = len(self.categorized_series["img_multiC"])
-        print("exporting " + str(total_multiC) + " multichannel images")       
-        
-        for nr, imagentry in enumerate(self.categorized_series["img_multiC"]):
-            
-            self.printProgressBar(nr + 1, total_multiC, prefix = 'Progress:', suffix = 'Complete', length = 50)
-            
-            series_nr = imagentry["nr"]
-            series_name = imagentry["name"]
-            resolution_mpp = imagentry["mpp"]
-            totalchannels = imagentry['SizeC']
-            outputpath = os.path.join(self.filename,"raw tifs","multichannel images",series_name+".tif")
-            
-
-            
-            image = self.get_image_array(c= None, z=0, t=0, series = series_nr)
-            image = np.moveaxis(image,2,0)  #exchange dimensions
-            self.save_single_tif(image,outputpath, resolution_mpp, photometric = 'minisblack')      
-    
-        # export zstacks images
-        total_zstack = len(self.categorized_series["z_stack"])
-        print("exporting " + str(total_zstack) + " zstacks") 
-        
-        for nr, imagentry in enumerate(self.categorized_series["z_stack"]):
-
-            series_nr = imagentry["nr"]
-            series_name = imagentry["name"]
-            resolution_mpp = imagentry["mpp"]
-            planes = imagentry['SizeZ']
-            #totalchannels = imagentry['SizeC']
-            print("exporting z-stack ", series_name)
-            
-            outputpath = os.path.join(self.filename,"raw tifs","zstacks",series_name)  
-
-            if not os.path.exists(outputpath):
-                    os.makedirs(outputpath)
-
-            for plane in np.arange(planes):
-                self.printProgressBar(plane+1, planes, prefix = 'Progress:', suffix = 'Complete', length = 50)
-                
-                #outputpath = os.path.join(self.filename,"raw tifs","videos", series_name, series_name+"-{:04d}.tif".format(frame))            
-                planepath = os.path.join(outputpath, series_name+"-{:04d}.tif".format(plane))
-                image = self.get_image_array(c=0, z=plane, t=0, series = series_nr)
-                self.save_single_tif(image,planepath, resolution_mpp)           
     
     def check_contrast(self, image, vmin=None, vmax =None):
         """
@@ -846,6 +520,7 @@ class lif_summary:
         output_scalebar = np.array(scalebar)
         return output_scalebar
 
+    #todo: reorganize such that cmds are not repeated in create_scalebar...
     def plot_scalebar(self, input_image, microns_per_pixel, image_name = None):
         """
             plots scalebar + title onto image if desired
@@ -895,136 +570,6 @@ class lif_summary:
         output_image = np.array(image_scalebar)
                 
         return output_image
-
-    def printProgressBar (self, iteration, total, prefix = '', suffix = '', decimals = 1, length = 100, fill = '█'):
-        """
-        print iteration progress
-        Call in a loop to create terminal progress bar
-        @params:
-            iteration   - Required  : current iteration (Int)
-            total       - Required  : total iterations (Int)
-            prefix      - Optional  : prefix string (Str)
-            suffix      - Optional  : suffix string (Str)
-            decimals    - Optional  : positive number of decimals in percent complete (Int)
-            length      - Optional  : character length of bar (Int)
-            fill        - Optional  : bar fill character (Str)
-        """
-        percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-        filledLength = int(length * iteration // total)
-        bar = fill * filledLength + '-' * (length - filledLength)
-        print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end = '\r')
-        # Print New Line on Complete
-        if iteration == total: 
-            print()
-    
-    def export_compressed_data(self):
-        """
-            exports jpgs and videos of files, adds title + scale bar for jpgs, scale bar for video
-        """
-        
-        print("-----------------------------")
-        print("exporting compressed data")
-        
-        #make it easier, just one loop and separare then between raw and compressed?
-        
-        #images
-        total_images = len(self.categorized_series["img_simple"])
-        print("exporting " + str(total_images) + " simple images")
-
-        for nr, imagentry in enumerate(self.categorized_series["img_simple"]):
-
-            self.printProgressBar(nr + 1, total_images, prefix = 'Progress:', suffix = 'Complete', length = 50)
-            
-            series_nr = imagentry["nr"]
-            series_name = imagentry["name"]
-            resolution_mpp = imagentry["mpp"]
-            outputpath_jpg = os.path.join(self.filename,"compressed","images",series_name+".jpg")
-            
-            if imagentry["subfolder"] != None:
-                subfolder = os.path.join(self.filename,"compressed","images",imagentry["subfolder"])
-                if not os.path.exists(subfolder):
-                    os.makedirs(subfolder)
-            else:
-                subfolder = None            
-            
-            image = self.get_image_array(c=0, z=0, t=0, series = series_nr)
-            bit_resolution = imagentry["bit_resolution"]
-            img_scale = 2**bit_resolution - 1
-            
-            #image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"], imagentry["Whiteval"])
-            image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"]*img_scale, imagentry["Whiteval"]*img_scale)
-            #image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/65535.0))
-            print(image_adj_contrast.max)
-            image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
-            
-            labeled_image = self.plot_scalebar(image_8, resolution_mpp, series_name)
-            
-            skimage.io.imsave(outputpath_jpg, labeled_image)
-            
-        # videos
-        
-        total_videos = len(self.categorized_series["img_multiT"])
-        print("exporting " + str(total_videos) + " videos")
-        
-        fourcc = cv2.VideoWriter_fourcc(*'MP4V')
-        
-        for videonr, imagentry in enumerate(self.categorized_series["img_multiT"]):
-   	
-            print("video", videonr)
-            
-            series_name = imagentry["name"]
-            series_nr = imagentry["nr"]            
-            resolution_mpp = imagentry["mpp"]
-            totalframes = imagentry['SizeT']
-            sizeX = imagentry['SizeX']
-            fps = imagentry['fps']
-            
-            if fps < 0.1:   #timelapse video
-                fps = 5
-            
-            if sizeX == 2048:   #scale down 2048 videos only
-                scalefactor = 2
-            else:
-                scalefactor = 1
-            outputsizeX = int(sizeX/scalefactor)
-            
-            subfolder = imagentry["subfolder"]
-
-            # create subfolder, depending on MarkAndFind
-            if subfolder != None:
-                outputfolder = os.path.join(self.filename,"compressed","videos", subfolder)
-            else:
-                outputfolder = os.path.join(self.filename,"compressed","videos")
-            
-            if not os.path.exists(outputfolder):
-                os.makedirs(outputfolder)            
-            
-            
-            outputpath = os.path.join(outputfolder, series_name + ".mp4")
-            video=cv2.VideoWriter(outputpath,fourcc,fps,(outputsizeX,outputsizeX),False)#-1: Select codec manually, False: monochrome images
-
-            print(outputpath)
-
-            scalebar = self.create_scalebar(sizeX,resolution_mpp)# don't adjust, applied to raw image, scaled down together
-            scale_width_px = scalebar.shape[0]
-            scale_height_px = scalebar.shape[1]
-            
-            for frame in np.arange(totalframes):
-                
-                self.printProgressBar(frame+1, totalframes, prefix = 'Progress:', suffix = 'Complete', length = 50)
-                
-                image = self.get_image_array(c=0, z=0, t=frame, series = series_nr)
-                bit_resolution = imagentry["bit_resolution"]
-                image_scale = 2**bit_resolution - 1
-                
-                image_adj_contrast = self.adj_contrast(image, imagentry["Blackval"]*image_scale, imagentry["Whiteval"]*image_scale)   # each image gets adjusted individually... do once and keep values for all
-                image_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/65535.0))                              
-                image_8[-1-scale_width_px:-1,-1-scale_height_px:-1] = scalebar
-                image_8 = cv2.resize(image_8,(outputsizeX,outputsizeX))
-                
-                video.write(image_8)
-            cv2.destroyAllWindows()
-            video.release() 
 
     def create_ppt_summary(self):
         """
@@ -1095,26 +640,19 @@ class lif_summary:
         prs.save(outputpath)
         
 def main():
-    """
 
     inputlifs = glob.glob("*.lif") # get all .lif-files in current folder
     #inputlifs = [inputfile]    # if you just want to read one file
     
+    # export each file
     for inputfile in inputlifs:     
         new_summary = lif_summary(inputfile)
-        new_summary.get_image_overview()
-        if new_summary.create_output_folders() == True:
-            new_summary.export_raw_tifs()
-            new_summary.export_compressed_data()
-            new_summary.create_ppt_summary()
-        new_summary.close()
+        # add option again to check if folder already exists?
+        new_summary.export_xy()
+        new_summary.export_xyz()
+        new_summary.export_xyc()
+        new_summary.export_xyt()
+        #new_summary.create_ppt_summary()
     
-    # move files into newly created folders when finished
-    for inputfile in inputlifs:
-        print("moving lif-file")
-        os.rename(inputfile, os.path.join(os.path.splitext(inputfile)[0], inputfile))
-        print("finished")
-    
-    """
 if __name__ == "__main__":
     main()
