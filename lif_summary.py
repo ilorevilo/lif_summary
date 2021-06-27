@@ -119,13 +119,42 @@ class lif_summary:
         chaninfo = [chan_el.attrib["ContrastingMethodName"] + "_" + chan_el.attrib["FluoCubeName"] for chan_el in chan_els]            
         
         return chaninfo
+        
+    def _query_timestamp(self, imgentry):
+        """ returns acquision date (= first timestamp) of selected entry """
+        tsquery = self._build_query(imgentry,"Data/Image/TimeStampList")
+        rootel = self.lifhandler.xml_root
+        # try:
+        ts = rootel.find(tsquery).text
+        ts = ts.split(" ")[0]
+        # except (AttributeError, TypeError):
+        # return None
+        
+        # conversion adapted from bioformats
+        stampLowStart = max(0, len(ts) - 8)
+        stampHighEnd = max(0, stampLowStart)
+
+        stampHigh = ts[0: stampHighEnd]
+        stampLow = ts[stampLowStart:]
+        
+        low = int(stampLow,16)
+        high = int(stampHigh,16)    
+
+        ticks = (high << 32) | low
+        ticks = ticks/10000
+        
+        COBOL_EPOCH = 11644473600000
+        ts_unix = int(ticks - COBOL_EPOCH) # in ms
+
+        return ts_unix
     
     def _log_img(self,imgentry):
         """
             logs currently exported imagentry to logfile
         """
         logging.warning(f"########## exporting entry {imgentry['idx']} ##########")
-        for entry in ["name", "path", "bit_depth", "dims", "scale", "channels", "chaninfo"]:
+        for entry in ["name", "path", "bit_depth", "dims", "scale", 
+                        "channels", "chaninfo", "Blackval", "Whiteval", "AcqTS"]:
             logging.warning(f'{entry}: %s', imgentry[entry])
     
     def _get_overview(self):
@@ -139,6 +168,7 @@ class lif_summary:
             # print(img)
             img["idx"] = idx # add index which is used to request frame
             img["chaninfo"] = self._query_chan(img)
+            img["AcqTS"] = self._query_timestamp(img)
             
             if ('EnvironmentalGraph') in img["name"]:
                 self.grouped_img["envgraph"].append(img)
@@ -478,6 +508,7 @@ class lif_summary:
                 "correspond to an over/underexposure of > 20 % of the image "
                 "or the image would span < 20 % of chosen range"
                 "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
+            logging.warning('adjusting contrast range to', vmin, vmax)
             #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
             vmin, vmax = None, None
         
