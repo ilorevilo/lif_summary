@@ -35,6 +35,8 @@ import logging
 import subprocess as sp
 import shlex
 import time
+import tqdm
+import sys
 
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg-imageio")
 #IMAGEMAGICK_BINARY = os.getenv("IMAGEMAGICK_BINARY", "auto-detect")
@@ -58,6 +60,7 @@ class lif_summary:
         self.filename_full = self.lif_path.name
         self.outdir = self.lif_path.parent/self.filename      
         
+        print("#########################")
         print("importing file", self.filename_full)
         
         self.lifhandler = LifFile(self.lif_path)
@@ -169,6 +172,8 @@ class lif_summary:
             img["idx"] = idx # add index which is used to request frame
             img["chaninfo"] = self._query_chan(img)
             img["AcqTS"] = self._query_timestamp(img)
+            img["Blackval"] = None
+            img["Whiteval"] = None
             
             if ('EnvironmentalGraph') in img["name"]:
                 self.grouped_img["envgraph"].append(img)
@@ -182,25 +187,25 @@ class lif_summary:
 
             # xy (simple image)
             if (Nz == 1 and NT == 1 and NC == 1):
-                print("entry is xy")
+                # print("entry is xy")
                 self.grouped_img["xy"].append(img)
                 continue
 
             # xyc (multichannel image)
             if (Nz == 1 and NT == 1 and NC > 1):
-                print("entry is xyc")
+                # print("entry is xyc")
                 self.grouped_img["xyc"].append(img)
                 continue
 
             # xyz (singlechannel zstack)
             if (Nz > 1 and NT == 1 and NC == 1):
-                print("entry is xyz")
+                # print("entry is xyz")
                 self.grouped_img["xyz"].append(img)
                 continue
                 
             # xyt singlechannel video/ timelapse
             if (Nz == 1 and NT > 1 and NC==1):
-                print("entry is xyt")
+                # print("entry is xyt")
             
                 img["fps"] = img["scale"][3]
                 self.grouped_img["xyt"].append(img)
@@ -208,7 +213,7 @@ class lif_summary:
                 
             # xyct (multichannel video/ timelapse)
             if (Nz ==1 and NT > 1 and NC>1):
-                print("entry is xyct")
+                # print("entry is xyct")
             
                 img["fps"] = img["scale"][3]
                 self.grouped_img["xyct"].append(img)
@@ -238,7 +243,7 @@ class lif_summary:
             f.write(xmlstr)        
         #https://stackoverflow.com/questions/56682486/xml-etree-elementtree-element-object-has-no-attribute-write
         
-    def export_xy(self):
+    def export_xy(self, min_rangespan=0.2, max_clipped=0.2):
         """
             exports all xy image entries:
             - raw export: tif 
@@ -259,7 +264,7 @@ class lif_summary:
             self._log_img(imgentry)
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
-            print(f"exporting image {img_name} with meta: \n {imgentry}")
+            print(f"exporting image {img_name}")# with meta: \n {imgentry}")
             """
             # option to concatenate subfolders into filename
             path = imgentry["path"] # subfolders are nested here: projectname/subf1/subf2/
@@ -283,7 +288,9 @@ class lif_summary:
             img_scale = 2**bit_resolution - 1
             
             # image_adj_contrast = self.adj_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
-            vmin, vmax = self.check_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)
+            vmin, vmax = self.check_contrast(img_np, 
+                imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale,
+                min_rangespan=min_rangespan, max_clipped=max_clipped)
             image_adj_contrast = exposure.rescale_intensity(img_np, in_range=(vmin, vmax)) # stretch min/max
             img_8 = cv2.convertScaleAbs(image_adj_contrast,alpha=(255.0/img_scale))
             
@@ -309,7 +316,7 @@ class lif_summary:
             resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
-            print(f"exporting zstack {img_name} with meta: \n {imgentry}")
+            print(f"exporting zstack {img_name}")# with meta: \n {imgentry}")
             imghandler = self.lifhandler.get_image(img_idx)   
             
             # get correct z-spacing dz
@@ -324,7 +331,8 @@ class lif_summary:
             stackfolder.mkdir(parents=True, exist_ok=True)
             
             Nplanes = imgentry["dims"][2]
-            for plane in np.arange(Nplanes):
+            for plane in tqdm.tqdm(np.arange(Nplanes), desc="Plane",
+                    file = sys.stdout, position = 0, leave=True):            
                 
                 img = imghandler.get_frame(z=plane, t=0, c=0)
                 img_np = np.array(img)                
@@ -350,7 +358,7 @@ class lif_summary:
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
             imgpath = rawfolder/(img_name+".tif")
-            print(f"exporting multichannel {img_name} with meta: \n {imgentry}")
+            print(f"exporting multichannel {img_name}")# with meta: \n {imgentry}")
 
             
             imghandler = self.lifhandler.get_image(img_idx)
@@ -359,7 +367,7 @@ class lif_summary:
             img_xyc = np.array(channel_list)
             self.save_single_tif(img_xyc, imgpath, resolution_mpp, photometric = 'minisblack')            
 
-    def export_xyt(self):
+    def export_xyt(self, min_rangespan=0.2, max_clipped=0.2):
         """
             exports all xyt image entries (=video/ timelapse entries)
             directly pipes frames to ffmpeg
@@ -382,7 +390,7 @@ class lif_summary:
             img_idx = imgentry["idx"]
             img_name = imgentry["name"]
             fps = imgentry['fps']
-            Nx, Ny = imgentry["dims"][0], imgentry["dims"][1]
+            Nx, Ny, NT = imgentry["dims"][0], imgentry["dims"][1], imgentry["dims"][3]
             Nmax_sm = 1024 # longest side of small video
             codec_lg, codec_sm = 'libx264', 'libx264'
             crf_lg, crf_sm = 17, 23
@@ -400,8 +408,8 @@ class lif_summary:
             scale_width_px = scalebar.shape[0]
             scale_height_px = scalebar.shape[1]
             
-            print(f"exporting video {img_name} with meta: \n {imgentry}")   
-            print("resolution of small video:", Nx_sm, Ny_sm)            
+            print(f"exporting video {img_name}")# with meta: \n {imgentry}")
+            #print("resolution of small video:", Nx_sm, Ny_sm)            
             imghandler = self.lifhandler.get_image(img_idx)
 
             # export of both vids simultaneously, get infos to start ffmpeg subprocess
@@ -420,12 +428,14 @@ class lif_summary:
             # solution from https://stackoverflow.com/questions/61260182/how-to-output-x265-compressed-video-with-cv2-videowriter
             process_lg = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_lg} '
                 f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_lg} '
-                f'-pix_fmt yuv420p -crf {crf_lg} -metadata comment="{resinfo_lg}" "{path_lg}"'), stdin=sp.PIPE)
+                f'-pix_fmt yuv420p -crf {crf_lg} -metadata comment="{resinfo_lg}" "{path_lg}"'), stdin=sp.PIPE,
+                stderr=sp.DEVNULL) # supress ffmpeg output to console
              
             # directly create process for export of smaller vid -> img has to be pulled only once
             process_sm = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_sm} '
                 f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_sm} '
-                f'-pix_fmt yuv420p -crf {crf_sm} -metadata comment="{resinfo_sm}" "{path_sm}"'), stdin=sp.PIPE)
+                f'-pix_fmt yuv420p -crf {crf_sm} -metadata comment="{resinfo_sm}" "{path_sm}"'), stdin=sp.PIPE,
+                stderr=sp.DEVNULL) #
             
             # check correct exposure scaling on one frame (image at half videolength)
             # save frame also as tif in full res for later access
@@ -435,8 +445,13 @@ class lif_summary:
             
             bit_resolution = imgentry["bit_depth"][0]
             img_scale = 2**bit_resolution - 1               
-            vmin, vmax = self.check_contrast(img_np, imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale)   
+            vmin, vmax = self.check_contrast(img_np, 
+                imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale,
+                min_rangespan=min_rangespan, max_clipped=max_clipped)
             vmin8, vmax8 = vmin*(255.0/img_scale), vmax*(255.0/img_scale) # adjust to 8bit
+            # print(imgentry["Blackval"], imgentry["Whiteval"])
+            # print(vmin8, vmax8)
+            # logging.warning(f'set vmin8, vmax8 to {vmin8}, {vmax8}')
             
             # save single tiff in full size
             stillpath = self.outdir/"Videos"/"tifstills"
@@ -450,7 +465,8 @@ class lif_summary:
             # -f: "Force input or output file format. -> here set to raw stream"
             # -r: framerate, can be used for input and output stream, here only input specified -> output will be same
             # -i: pipe
-            for frame in imghandler.get_iter_t(c=0, z=0):
+            for frame in tqdm.tqdm(imghandler.get_iter_t(c=0, z=0), desc="Frame",
+                    file = sys.stdout, position = 0, leave=True, total=NT):
                 img_np = np.array(frame)
                 img8 = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale)) # scale to 8bit range
                 img_scaled = exposure.rescale_intensity(img8, in_range=(vmin8, vmax8)) # stretch min/max
@@ -484,10 +500,11 @@ class lif_summary:
             tifffile.imsave(path, image, imagej=True, resolution=(resolution_ppm, resolution_ppm), 
             metadata=metadata, photometric = photometric, compress = compress)
     
-    def check_contrast(self, image, vmin=None, vmax =None):
+    def check_contrast(self, image, vmin=None, vmax =None, min_rangespan=0.2, max_clipped=0.2):
         """
             checks if desired scaling range between vmin and vmax yields to a reasonable
-            intensity range (< 20 % of image over/underexposed, image spans > 20 % of range)
+            intensity range (< max_clipped (20 % default) of image over/underexposed, 
+            image spans > min_rangespan (20 % default) of range)
             adjusts vmin and vmax to 0.2 - 99.8 percentile if not
         """
         
@@ -502,13 +519,13 @@ class lif_summary:
         
         # check fraction of px outside defined interval (max. 1 = all)
         # outside px are over/underexposed
-        px_outside = ((image < vmin) | (image > vmax)).sum()/ image.size
-        if ((px_outside > 0.2) or (rangespan < 0.2)):
+        px_clipped = ((image < vmin) | (image > vmax)).sum()/ image.size
+        if ((px_clipped > max_clipped) or (rangespan < min_rangespan)):
             print("extracted histogram scaling (blackval/ whiteval) would " 
                 "correspond to an over/underexposure of > 20 % of the image "
                 "or the image would span < 20 % of chosen range"
                 "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
-            logging.warning('adjusting contrast range to', vmin, vmax)
+            logging.warning(f'adjusting contrast range to {vmin}, {vmax}')
             #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
             vmin, vmax = None, None
         
@@ -679,10 +696,10 @@ def main():
     for inputfile in inputlifs:     
         new_summary = lif_summary(inputfile)
         # add option again to check if folder already exists?
-        new_summary.export_xy()
+        new_summary.export_xy(min_rangespan = 0.2, max_clipped = 0.6)
         new_summary.export_xyz()
         new_summary.export_xyc()
-        new_summary.export_xyt()
+        new_summary.export_xyt(min_rangespan = 0.2, max_clipped = 0.6)
         #new_summary.create_ppt_summary()
     
 if __name__ == "__main__":
