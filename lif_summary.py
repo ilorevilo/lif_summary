@@ -61,8 +61,7 @@ class lif_summary:
         self.outdir = self.lif_path.parent/self.filename      
         self.outdir.mkdir(parents=True, exist_ok=True)   
         
-        logging.shutdown() #clear old logger
-        logging.getLogger().handlers.clear()
+        self._release_logger()
         logging.basicConfig(filename=self.outdir/(self.filename+'_extractlog.log'), filemode='w', level=logging.DEBUG, format='%(message)s')
         
         print("#########################")
@@ -80,6 +79,15 @@ class lif_summary:
         self._log_overview()
         self.print_overview()
         self._write_xml()
+
+    def _release_logger(self):
+        """ 
+            releases old logger instance, called upon init of new lif
+            might be useful in e.g. jupyter where object not automatically released after export
+        """
+        
+        logging.shutdown() #clear old logger
+        logging.getLogger().handlers.clear()        
 
     def _build_query(self, imgentry, query=""):
         """
