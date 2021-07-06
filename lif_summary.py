@@ -56,25 +56,29 @@ class lif_summary:
         """
         self.lif_path = Path(lif_file)
         
-        self.filename = self.lif_path.stem
+        self.filename = self.lif_path.stem       
         self.filename_full = self.lif_path.name
         self.outdir = self.lif_path.parent/self.filename      
-        
-        print("#########################")
-        print("importing file", self.filename_full)
-        
-        self.lifhandler = LifFile(self.lif_path)
-        
-        # specify categories under which images "series" will get sorted later        
-        self.grouped_img = {"xy":[], "xyc":[], "xyz":[], "xyt":[],"xyct":[],"envgraph":[],"other":[]}
-
-        self.outdir.mkdir(parents=True, exist_ok=True)
+        self.outdir.mkdir(parents=True, exist_ok=True)   
         
         logging.shutdown() #clear old logger
         logging.getLogger().handlers.clear()
         logging.basicConfig(filename=self.outdir/(self.filename+'_extractlog.log'), filemode='w', level=logging.DEBUG, format='%(message)s')
         
+        print("#########################")
+        print("reading file", self.filename_full)
+        
+        self.lifhandler = LifFile(self.lif_path)
+        
+        # categories under which images "series" will get sorted later
+        self.export_entries = ["xy", "xyc", "xyz", "xyt"] # currently supported entrytypes for export
+        self.nonexport_entries = ["xyct", "xycz", "xyzt", "xyczt", "envgraph", "MAF", "other"]
+        self.grouped_img = {key:[] for key in self.export_entries}
+        self.grouped_img.update( {key:[] for key in self.nonexport_entries})
+        
         self._get_overview()
+        self._log_overview()
+        self.print_overview()
         self._write_xml()
 
     def _build_query(self, imgentry, query=""):
@@ -160,6 +164,62 @@ class lif_summary:
                         "channels", "chaninfo", "Blackval", "Whiteval", "AcqTS"]:
             logging.warning(f'{entry}: %s', imgentry[entry])
     
+    def _log_overview(self):
+        """ logs info of entries added by _get_overview to logfile """
+        
+        logging.warning(f"########## entries found in file ##########")
+        logging.warning(f"- entries which will be exported:")
+
+        for imgtype in self.export_entries:
+            imglist = self.grouped_img[imgtype]
+
+            logging.warning(f'{imgtype}: {len(imglist)}')
+            
+        logging.warning(f"- entries whose export is not supported yet:")
+        
+        N_nonexported = 0
+        for imgtype in self.nonexport_entries:
+            imglist = self.grouped_img[imgtype]
+
+            if len(imglist) > 0:
+                N_nonexported += len(imglist)
+                
+            logging.warning(f'{imgtype}: {len(imglist)}')         
+
+        if N_nonexported > 0:
+            logging.warning(f"### {N_nonexported} entries won't be exported ###")
+
+    
+    def print_overview(self):
+        """ prints overview of found entries, shows which ones will be exported """
+    
+        print("following entries found in file: ")
+        print("- entries which will be exported:")
+        
+        for imgtype in self.export_entries:
+            imglist = self.grouped_img[imgtype]
+
+            col = '\033[0m'
+            if len(imglist) > 0:
+                col = '\033[92m'
+                
+            print(f'{col} {imgtype}: {len(imglist)}' + '\033[0m')   
+        
+        print("- entries whose export is not supported yet:")
+
+        N_nonexported = 0
+        for imgtype in self.nonexport_entries:
+            imglist = self.grouped_img[imgtype]
+            col = '\033[0m'
+            if len(imglist) > 0:
+                N_nonexported += len(imglist)
+                col = '\033[93m'
+                
+            print(f'{col} {imgtype}: {len(imglist)}' + '\033[0m')   
+        
+        if N_nonexported > 0:
+            print(f"\033[91m {N_nonexported} entries won't be exported \033[0m")
+        
     def _get_overview(self):
         """
             extracts information of stored images from metadata
@@ -175,10 +235,15 @@ class lif_summary:
             img["Blackval"] = None
             img["Whiteval"] = None
             
+            # check for special cases first
             if ('EnvironmentalGraph') in img["name"]:
                 self.grouped_img["envgraph"].append(img)
                 continue
             
+            if ('Mark_and_Find') in img["path"]:
+                self.grouped_img["MAF"].append(img)
+                continue
+                
             # check various dimensions to sort entries accordingly
             dimtuple = img["dims"]
             Nx, Ny, Nz, NT = dimtuple[0], dimtuple[1], dimtuple[2], dimtuple[3]
@@ -189,38 +254,47 @@ class lif_summary:
             if (Nz == 1 and NT == 1 and NC == 1):
                 # print("entry is xy")
                 self.grouped_img["xy"].append(img)
-                continue
 
             # xyc (multichannel image)
-            if (Nz == 1 and NT == 1 and NC > 1):
+            elif (Nz == 1 and NT == 1 and NC > 1):
                 # print("entry is xyc")
                 self.grouped_img["xyc"].append(img)
-                continue
 
             # xyz (singlechannel zstack)
-            if (Nz > 1 and NT == 1 and NC == 1):
+            elif (Nz > 1 and NT == 1 and NC == 1):
                 # print("entry is xyz")
                 self.grouped_img["xyz"].append(img)
-                continue
                 
             # xyt singlechannel video/ timelapse
-            if (Nz == 1 and NT > 1 and NC==1):
+            elif (Nz == 1 and NT > 1 and NC==1):
                 # print("entry is xyt")
             
                 img["fps"] = img["scale"][3]
                 self.grouped_img["xyt"].append(img)
-                continue
                 
             # xyct (multichannel video/ timelapse)
-            if (Nz ==1 and NT > 1 and NC>1):
-                # print("entry is xyct")
-            
+            elif (Nz == 1 and NT > 1 and NC > 1):
+
                 img["fps"] = img["scale"][3]
                 self.grouped_img["xyct"].append(img)
-                continue                           
                 
+            # xycz
+            elif (Nz > 1 and NT == 1 and NC > 1):
+                self.grouped_img["xycz"].append(img)
+                
+            # xyzt
+            elif (Nz > 1 and NT > 1 and NC == 1):
+                img["fps"] = img["scale"][3]
+                self.grouped_img["xyzt"].append(img)
+
+            # xyczt
+            elif (Nz > 1 and NT > 1 and NC > 1):
+                img["fps"] = img["scale"][3]
+                self.grouped_img["xyczt"].append(img)                
+
             # add to category other if no previously checked category applies
-            self.grouped_img["other"].append(img)
+            else:
+                self.grouped_img["other"].append(img)
         
         # find blackval/whiteval (or even other param if desired) for xy and xyt-images
         for cat in ["xy","xyt"]:
@@ -250,6 +324,10 @@ class lif_summary:
             - compressed export (jpg, scaled to blackval/whiteval which was set during acquisition 
                 with burned in title + scale bar)
         """
+        
+        # check if entries to export        
+        if len(self.grouped_img["xy"]) == 0:
+            return
         
         #### raw export folder
         rawfolder = self.outdir/"Images_xy"/"raw"
@@ -304,7 +382,12 @@ class lif_summary:
             exports all xyz image entries (=zstacks)
             - raw export: tif 
             - compressed export: none
-        """        
+        """ 
+
+        # check if entries to export
+        if len(self.grouped_img["xyz"]) == 0:
+            return
+
         #### raw export folder
         rawfolder = self.outdir/"Images_xyz"
         rawfolder.mkdir(parents=True, exist_ok=True)
@@ -346,6 +429,11 @@ class lif_summary:
             - raw export: tif 
             - compressed export: none            
         """
+        
+        # check if entries to export        
+        if len(self.grouped_img["xyc"]) == 0:
+            return
+            
         #### raw export folder
         rawfolder = self.outdir/"Images_xyc"
         rawfolder.mkdir(parents=True, exist_ok=True)        
@@ -374,6 +462,9 @@ class lif_summary:
             - large export: .mp4 in full resolution, low compression
             - small export: .mp4, longest side scaled to 1024, include scalebar          
         """
+        # check if entries to export        
+        if len(self.grouped_img["xyt"]) == 0:
+            return        
         
         #### hq export folder
         lgfolder = self.outdir/"Videos"/"lg"
@@ -484,6 +575,17 @@ class lif_summary:
             
             print("video export finished in", time.time()-startt, "s")
 
+    def export_all(self):
+        """ 
+            exports xy, xyc, xyz, xyt entries (all currently supported export options)
+            by calling individual exportfunctions
+        """
+
+        self.export_xy(min_rangespan = 0.2, max_clipped = 0.6)
+        self.export_xyz()
+        self.export_xyc()
+        self.export_xyt(min_rangespan = 0.2, max_clipped = 0.6)
+
     def save_single_tif(self, image, path, resolution_mpp, photometric = None, compress = None):
         """
             saves single imagej-tif into specified folder
@@ -521,10 +623,11 @@ class lif_summary:
         # outside px are over/underexposed
         px_clipped = ((image < vmin) | (image > vmax)).sum()/ image.size
         if ((px_clipped > max_clipped) or (rangespan < min_rangespan)):
-            print("extracted histogram scaling (blackval/ whiteval) would " 
+            print('\033[96m' + "extracted histogram scaling (blackval/ whiteval) would " 
                 "correspond to an over/underexposure of > 20 % of the image "
                 "or the image would span < 20 % of chosen range"
-                "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile")
+                "-> switching to automatic rescaling to range from 0.2 - 99.8 percentile" +
+                '\033[0m')
             logging.warning(f'adjusting contrast range to {vmin}, {vmax}')
             #print(f"vmin {vmin}, vmax {vmax}, immin {imglimits[0]}, immax {imglimits[1]}")
             vmin, vmax = None, None
@@ -693,14 +796,16 @@ def main():
     #inputlifs = [inputfile]    # if you just want to read one file
     
     # export each file
-    for inputfile in inputlifs:     
-        new_summary = lif_summary(inputfile)
-        # add option again to check if folder already exists?
-        new_summary.export_xy(min_rangespan = 0.2, max_clipped = 0.6)
-        new_summary.export_xyz()
-        new_summary.export_xyc()
-        new_summary.export_xyt(min_rangespan = 0.2, max_clipped = 0.6)
-        #new_summary.create_ppt_summary()
+    for inputfile in inputlifs:
+        try:
+            new_summary = lif_summary(inputfile)
+            # add option again to check if folder already exists?
+            new_summary.export_all()
+            #new_summary.create_ppt_summary()
+        except Exception as ex:
+            logging.exception('Error in export of lif-file')
+            print( '\033[91m' + 'Error occured in export of current lif-file, '
+            'check log for detailed info. Skipping to next file' + '\033[0m')   
     
 if __name__ == "__main__":
     main()
