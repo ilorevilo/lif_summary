@@ -492,18 +492,32 @@ class lif_summary:
             img_name = imgentry["name"]
             fps = imgentry['fps']
             Nx, Ny, NT = imgentry["dims"][0], imgentry["dims"][1], imgentry["dims"][3]
+            
+            # reduce Nx/ Ny by 1 px if not divisble by 2 -> otherwise issue exporting with h264 codec
+            if Nx % 2 != 0:
+                Nx = Nx-1
+            if Ny % 2 != 0:
+                Ny = Ny-1
+            
             Nmax_sm = 1024 # longest side of small video
             codec_lg, codec_sm = 'libx264', 'libx264'
             crf_lg, crf_sm = 17, 23
 
-            #rescale smaller video such that longest side = 1024
-            # prevent upscaling
-            Nlong = max(Nx, Ny)
+            #rescale smaller video such that longest side = 1024, no upscaling
+            Nlong = max(Nx, Ny) #Nx, Ny already adjusted here to be divisible by 2
             scalingfactor = float(Nmax_sm)/Nlong
             if scalingfactor > 1.0: # don't allow upscaling
                 scalingfactor = 1.0
             #print("scaling", scalingfactor)
-            Nx_sm, Ny_sm = int(Nx*scalingfactor), int(Ny*scalingfactor)
+            
+            # check if px dimensions of small video also divisble by 2
+            Nx_scaled, Ny_scaled = int(Nx*scalingfactor), int(Ny*scalingfactor)            
+            Nx_sm, Ny_sm = Nx_scaled, Ny_scaled
+            if Nx_sm % 2 != 0:
+                Nx_sm = Nx_sm-1
+            if Ny_sm % 2 != 0:
+                Ny_sm = Ny_sm-1
+            # take care, precisely Nx_sm/Nx != scalingfactor anymore (due to cropping of 1 px)
 
             scalebar = self.create_scalebar(Nx_sm,resolution_mpp/scalingfactor) #create scalebar for small vid
             scale_width_px = scalebar.shape[0]
@@ -568,11 +582,12 @@ class lif_summary:
             # -i: pipe
             for frame in tqdm.tqdm(imghandler.get_iter_t(c=0, z=0), desc="Frame",
                     file = sys.stdout, position = 0, leave=True, total=NT):
-                img_np = np.array(frame)
+                img_np = np.array(frame)[0:Ny, 0:Nx]
                 img8 = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale)) # scale to 8bit range
                 img_scaled = exposure.rescale_intensity(img8, in_range=(vmin8, vmax8)) # stretch min/max
                 
-                img_sm = cv2.resize(img_scaled, (Nx_sm,Ny_sm)) # scale down small vid
+                img_sm = cv2.resize(img_scaled, (Nx_scaled,Ny_scaled)) # scale down small vid
+                img_sm = img_sm[0:Ny_sm, 0:Nx_sm]
                 img_sm[-1-scale_width_px:-1,-1-scale_height_px:-1] = scalebar # add scalebar
                 
                 process_lg.stdin.write(img_scaled.tobytes())
