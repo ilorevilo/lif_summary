@@ -363,7 +363,7 @@ class lif_summary:
             
             imghandler = self.lifhandler.get_image(img_idx)
             img = imghandler.get_frame(z=0, t=0, c=0)
-            img_np = np.array(img)
+            img_np = np.array(img)  # take care, array shape is [Ny, Nx]
 
             resolution_mpp = 1.0/imgentry["scale_n"][1] # unit should be pix per micron of scale_n
             
@@ -493,22 +493,32 @@ class lif_summary:
             fps = imgentry['fps']
             Nx, Ny, NT = imgentry["dims"][0], imgentry["dims"][1], imgentry["dims"][3]
             
-            # check if fluo-video -> export single frames as list of tifs for optimal postprocessing
+            # check if fluo-video -> export as multipage tif for best quality
             if "FLUO" in '\t'.join(imgentry["chaninfo"]):
                 
                 imghandler = self.lifhandler.get_image(img_idx)
                                 
                 fpsstring = f"-{fps:.2f}_fps".replace(".","_") # write fps foldername such that it's easily accessible                               
-                fluofolder = self.outdir/"Videos"/"fluo"/(img_name+fpsstring)
+                fluofolder = self.outdir/"Videos"/"fluo"
                 fluofolder.mkdir(parents=True, exist_ok=True)
                 
+                # create empty array
+                outdim = (NT,1,1,Ny,Nx) # order: NT, Nz, Nc, Ny, Nx, take care, Nx, Ny inverted!
+                if imgentry['bit_depth'][0] == 16:
+                    outdtype = 'uint16'
+                elif imgentry['bit_depth'][0] == 8:
+                    outdtype = 'uint8'
+                outarr = np.zeros(outdim, dtype =outdtype)
+
+                # fill array with frames
                 for framenr in tqdm.tqdm(np.arange(NT), desc="Frame",
                         file = sys.stdout, position = 0, leave=True, total=NT):                
-                    
+
                     frame = imghandler.get_frame(t=framenr, c=0, z=0)
-                    img_np = np.array(frame)
-                    framepath = fluofolder/f"{img_name}-{framenr:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
-                    self.save_single_tif(img_np, framepath, resolution_mpp)
+                    outarr[framenr,0,0] = np.array(frame)
+
+                outpath = fluofolder/(img_name+fpsstring+'.tif')
+                self.save_single_tif(outarr, outpath, resolution_mpp)
                 
             # else export as video
             else:
