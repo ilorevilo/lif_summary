@@ -485,7 +485,7 @@ class lif_summary:
 
         # iterate all entries
         for imgentry in self.grouped_img["xyt"]:
-       
+
             self._log_img(imgentry)
             resolution_mpp = 1.0/imgentry["scale_n"][1]
             img_idx = imgentry["idx"]
@@ -493,112 +493,133 @@ class lif_summary:
             fps = imgentry['fps']
             Nx, Ny, NT = imgentry["dims"][0], imgentry["dims"][1], imgentry["dims"][3]
             
-            # reduce Nx/ Ny by 1 px if not divisble by 2 -> otherwise issue exporting with h264 codec
-            if Nx % 2 != 0:
-                Nx = Nx-1
-            if Ny % 2 != 0:
-                Ny = Ny-1
-            
-            Nmax_sm = 1024 # longest side of small video
-            codec_lg, codec_sm = 'libx264', 'libx264'
-            crf_lg, crf_sm = 17, 23
-
-            #rescale smaller video such that longest side = 1024, no upscaling
-            Nlong = max(Nx, Ny) #Nx, Ny already adjusted here to be divisible by 2
-            scalingfactor = float(Nmax_sm)/Nlong
-            if scalingfactor > 1.0: # don't allow upscaling
-                scalingfactor = 1.0
-            #print("scaling", scalingfactor)
-            
-            # check if px dimensions of small video also divisble by 2
-            Nx_scaled, Ny_scaled = int(Nx*scalingfactor), int(Ny*scalingfactor)            
-            Nx_sm, Ny_sm = Nx_scaled, Ny_scaled
-            if Nx_sm % 2 != 0:
-                Nx_sm = Nx_sm-1
-            if Ny_sm % 2 != 0:
-                Ny_sm = Ny_sm-1
-            # take care, precisely Nx_sm/Nx != scalingfactor anymore (due to cropping of 1 px)
-
-            scalebar = self.create_scalebar(Nx_sm,resolution_mpp/scalingfactor) #create scalebar for small vid
-            scale_width_px = scalebar.shape[0]
-            scale_height_px = scalebar.shape[1]
-            
-            print(f"exporting video {img_name}")# with meta: \n {imgentry}")
-            #print("resolution of small video:", Nx_sm, Ny_sm)            
-            imghandler = self.lifhandler.get_image(img_idx)
-
-            # export of both vids simultaneously, get infos to start ffmpeg subprocess
-            
-            resinfo_lg = f'resolution_xy={resolution_mpp:.6f}_mpp'.replace(".","_")
-            resinfo_sm = f'resolution_xy={resolution_mpp/scalingfactor:.6f}_mpp'.replace(".","_") # correct by scalingfactor
-            # stores resolution info in metadata (in category comment) for quick access from videofile
-            path_lg = str(lgfolder/(img_name+"_lg.mp4")) # string needed for input to ffmpeg cmd
-            path_sm = str(smfolder/(img_name+"_sm.mp4")) # string needed for input to ffmpeg cmd        
-            sizestring_lg = f'{Nx}x{Ny}' # e.g. 1024x1024, xsize x ysize, todo: check if order correct
-            sizestring_sm = f'{Nx_sm}x{Ny_sm}'
-
-            startt = time.time() #for quick check of exporttimes
-            
-            # write video via pipe to ffmpeg-stream, start process here
-            # solution from https://stackoverflow.com/questions/61260182/how-to-output-x265-compressed-video-with-cv2-videowriter
-            process_lg = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_lg} '
-                f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_lg} '
-                f'-pix_fmt yuv420p -crf {crf_lg} -metadata comment="{resinfo_lg}" "{path_lg}"'), stdin=sp.PIPE,
-                stderr=sp.DEVNULL) # supress ffmpeg output to console
-             
-            # directly create process for export of smaller vid -> img has to be pulled only once
-            process_sm = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_sm} '
-                f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_sm} '
-                f'-pix_fmt yuv420p -crf {crf_sm} -metadata comment="{resinfo_sm}" "{path_sm}"'), stdin=sp.PIPE,
-                stderr=sp.DEVNULL) #
-            
-            # check correct exposure scaling on one frame (image at half videolength)
-            # save frame also as tif in full res for later access
-            Nmean = int(imgentry["dims"][3]/2) - 1# idx of mean frame ~ at half of Nframes
-            mimg = imghandler.get_frame(z=0, t=Nmean, c=0)
-            img_np = np.array(mimg)
-            
-            bit_resolution = imgentry["bit_depth"][0]
-            img_scale = 2**bit_resolution - 1               
-            vmin, vmax = self.check_contrast(img_np, 
-                imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale,
-                min_rangespan=min_rangespan, max_clipped=max_clipped)
-            vmin8, vmax8 = vmin*(255.0/img_scale), vmax*(255.0/img_scale) # adjust to 8bit
-            # print(imgentry["Blackval"], imgentry["Whiteval"])
-            # print(vmin8, vmax8)
-            # logging.warning(f'set vmin8, vmax8 to {vmin8}, {vmax8}')
-            
-            # save single tiff in full size
-            stillpath = self.outdir/"Videos"/"tifstills"
-            stillpath.mkdir(parents=True, exist_ok=True)
-            self.save_single_tif(img_np, stillpath/(img_name+".tif"), resolution_mpp)            
-            
-            # kwarg info:
-            # -y: overwrite wo. asking
-            # -s: size
-            # -pixel_format: bgr24 was set... use gray8 for 8bit grayscale
-            # -f: "Force input or output file format. -> here set to raw stream"
-            # -r: framerate, can be used for input and output stream, here only input specified -> output will be same
-            # -i: pipe
-            for frame in tqdm.tqdm(imghandler.get_iter_t(c=0, z=0), desc="Frame",
-                    file = sys.stdout, position = 0, leave=True, total=NT):
-                img_np = np.array(frame)[0:Ny, 0:Nx]
-                img8 = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale)) # scale to 8bit range
-                img_scaled = exposure.rescale_intensity(img8, in_range=(vmin8, vmax8)) # stretch min/max
+            # check if fluo-video -> export single frames as list of tifs for optimal postprocessing
+            if "FLUO" in '\t'.join(imgentry["chaninfo"]):
                 
-                img_sm = cv2.resize(img_scaled, (Nx_scaled,Ny_scaled)) # scale down small vid
-                img_sm = img_sm[0:Ny_sm, 0:Nx_sm]
-                img_sm[-1-scale_width_px:-1,-1-scale_height_px:-1] = scalebar # add scalebar
+                imghandler = self.lifhandler.get_image(img_idx)
+                                
+                fpsstring = f"-{fps:.2f}_fps".replace(".","_") # write fps foldername such that it's easily accessible                               
+                fluofolder = self.outdir/"Videos"/"fluo"/(img_name+fpsstring)
+                fluofolder.mkdir(parents=True, exist_ok=True)
                 
-                process_lg.stdin.write(img_scaled.tobytes())
-                process_sm.stdin.write(img_sm.tobytes())
+                for framenr in tqdm.tqdm(np.arange(NT), desc="Frame",
+                        file = sys.stdout, position = 0, leave=True, total=NT):                
+                    
+                    frame = imghandler.get_frame(t=framenr, c=0, z=0)
+                    img_np = np.array(frame)
+                    framepath = fluofolder/f"{img_name}-{framenr:04d}.tif"  # series_name+"-{:04d}.tif".format(plane))
+                    self.save_single_tif(img_np, framepath, resolution_mpp)
                 
-            for process in [process_lg, process_sm]:
-                process.stdin.close()
-                process.wait()
-                process.terminate()
+            # else export as video
+            else:
             
-            print("video export finished in", time.time()-startt, "s")
+                # reduce Nx/ Ny by 1 px if not divisble by 2 -> otherwise issue exporting with h264 codec
+                if Nx % 2 != 0:
+                    Nx = Nx-1
+                if Ny % 2 != 0:
+                    Ny = Ny-1
+                
+                Nmax_sm = 1024 # longest side of small video
+                codec_lg, codec_sm = 'libx264', 'libx264'
+                crf_lg, crf_sm = 17, 23
+
+                #rescale smaller video such that longest side = 1024, no upscaling
+                Nlong = max(Nx, Ny) #Nx, Ny already adjusted here to be divisible by 2
+                scalingfactor = float(Nmax_sm)/Nlong
+                if scalingfactor > 1.0: # don't allow upscaling
+                    scalingfactor = 1.0
+                #print("scaling", scalingfactor)
+                
+                # check if px dimensions of small video also divisble by 2
+                Nx_scaled, Ny_scaled = int(Nx*scalingfactor), int(Ny*scalingfactor)            
+                Nx_sm, Ny_sm = Nx_scaled, Ny_scaled
+                if Nx_sm % 2 != 0:
+                    Nx_sm = Nx_sm-1
+                if Ny_sm % 2 != 0:
+                    Ny_sm = Ny_sm-1
+                # take care, precisely Nx_sm/Nx != scalingfactor anymore (due to cropping of 1 px)
+
+                scalebar = self.create_scalebar(Nx_sm,resolution_mpp/scalingfactor) #create scalebar for small vid
+                scale_width_px = scalebar.shape[0]
+                scale_height_px = scalebar.shape[1]
+                
+                print(f"exporting video {img_name}")# with meta: \n {imgentry}")
+                #print("resolution of small video:", Nx_sm, Ny_sm)            
+                imghandler = self.lifhandler.get_image(img_idx)
+
+                # export of both vids simultaneously, get infos to start ffmpeg subprocess
+                
+                resinfo_lg = f'resolution_xy={resolution_mpp:.6f}_mpp'.replace(".","_")
+                resinfo_sm = f'resolution_xy={resolution_mpp/scalingfactor:.6f}_mpp'.replace(".","_") # correct by scalingfactor
+                # stores resolution info in metadata (in category comment) for quick access from videofile
+                path_lg = str(lgfolder/(img_name+"_lg.mp4")) # string needed for input to ffmpeg cmd
+                path_sm = str(smfolder/(img_name+"_sm.mp4")) # string needed for input to ffmpeg cmd        
+                sizestring_lg = f'{Nx}x{Ny}' # e.g. 1024x1024, xsize x ysize, todo: check if order correct
+                sizestring_sm = f'{Nx_sm}x{Ny_sm}'
+
+                startt = time.time() #for quick check of exporttimes
+                
+                # write video via pipe to ffmpeg-stream, start process here
+                # solution from https://stackoverflow.com/questions/61260182/how-to-output-x265-compressed-video-with-cv2-videowriter
+                process_lg = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_lg} '
+                    f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_lg} '
+                    f'-pix_fmt yuv420p -crf {crf_lg} -metadata comment="{resinfo_lg}" "{path_lg}"'), stdin=sp.PIPE,
+                    stderr=sp.DEVNULL) # supress ffmpeg output to console
+                 
+                # directly create process for export of smaller vid -> img has to be pulled only once
+                process_sm = sp.Popen(shlex.split(f'"{FFMPEG_BINARY}" -y -s {sizestring_sm} '
+                    f'-pixel_format gray8 -f rawvideo -r {fps} -i pipe: -vcodec {codec_sm} '
+                    f'-pix_fmt yuv420p -crf {crf_sm} -metadata comment="{resinfo_sm}" "{path_sm}"'), stdin=sp.PIPE,
+                    stderr=sp.DEVNULL) #
+                
+                # check correct exposure scaling on one frame (image at half videolength)
+                # save frame also as tif in full res for later access
+                Nmean = int(imgentry["dims"][3]/2) - 1# idx of mean frame ~ at half of Nframes
+                mimg = imghandler.get_frame(z=0, t=Nmean, c=0)
+                img_np = np.array(mimg)
+                
+                bit_resolution = imgentry["bit_depth"][0]
+                img_scale = 2**bit_resolution - 1               
+                vmin, vmax = self.check_contrast(img_np, 
+                    imgentry["Blackval"]*img_scale, imgentry["Whiteval"]*img_scale,
+                    min_rangespan=min_rangespan, max_clipped=max_clipped)
+                vmin8, vmax8 = vmin*(255.0/img_scale), vmax*(255.0/img_scale) # adjust to 8bit
+                # print(imgentry["Blackval"], imgentry["Whiteval"])
+                # print(vmin8, vmax8)
+                # logging.warning(f'set vmin8, vmax8 to {vmin8}, {vmax8}')
+                
+                # save single tiff in full size
+                stillpath = self.outdir/"Videos"/"tifstills"
+                stillpath.mkdir(parents=True, exist_ok=True)
+                self.save_single_tif(img_np, stillpath/(img_name+".tif"), resolution_mpp)            
+                
+                # kwarg info:
+                # -y: overwrite wo. asking
+                # -s: size
+                # -pixel_format: bgr24 was set... use gray8 for 8bit grayscale
+                # -f: "Force input or output file format. -> here set to raw stream"
+                # -r: framerate, can be used for input and output stream, here only input specified -> output will be same
+                # -i: pipe
+                for frame in tqdm.tqdm(imghandler.get_iter_t(c=0, z=0), desc="Frame",
+                        file = sys.stdout, position = 0, leave=True, total=NT):
+                    img_np = np.array(frame)[0:Ny, 0:Nx]
+                    img8 = cv2.convertScaleAbs(img_np,alpha=(255.0/img_scale)) # scale to 8bit range
+                    img_scaled = exposure.rescale_intensity(img8, in_range=(vmin8, vmax8)) # stretch min/max
+                    
+                    img_sm = cv2.resize(img_scaled, (Nx_scaled,Ny_scaled)) # scale down small vid
+                    img_sm = img_sm[0:Ny_sm, 0:Nx_sm]
+                    if ((scale_width_px<Nx_sm) and (scale_height_px<Ny_sm)): #add scalebar to small video only if it fits
+                        img_sm[-1-scale_width_px:-1,-1-scale_height_px:-1] = scalebar # add scalebar
+                    
+                    process_lg.stdin.write(img_scaled.tobytes())
+                    process_sm.stdin.write(img_sm.tobytes())
+                    
+                for process in [process_lg, process_sm]:
+                    process.stdin.close()
+                    process.wait()
+                    process.terminate()
+                
+                print("video export finished in", time.time()-startt, "s")
 
     def export_all(self):
         """ 
