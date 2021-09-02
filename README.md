@@ -45,6 +45,13 @@ summary.export_all()    # convenience function calling all of the export options
 
 ## Changelog
 
+#### 2.1
+- add colorama to fix correct coloring in Windows terminals
+- add setup.py and option to call from commandline with `lifsum` or `lif_summary`
+- fix bug of correct outputvideo size
+- introduce export of xyct-entries as multipage-tif
+- introduce export of xyt-Fluo-entries as multipage-tif
+
 #### 2.0
 - switching reader to `readlif` for a python-only based lif-interface, no need to call `bioformats` via `javabridge` anymore
 - video exports are now handled by directly piping frames to ffmpeg yielding more precise control of the output video codec and compression

@@ -72,8 +72,8 @@ class lif_summary:
         self.lifhandler = LifFile(self.lif_path)
         
         # categories under which images "series" will get sorted later
-        self.export_entries = ["xy", "xyc", "xyz", "xyt"] # currently supported entrytypes for export
-        self.nonexport_entries = ["xyct", "xycz", "xyzt", "xyczt", "envgraph", "MAF", "other"]
+        self.export_entries = ["xy", "xyc", "xyz", "xyt", "xyct"] # currently supported entrytypes for export
+        self.nonexport_entries = ["xycz", "xyzt", "xyczt", "envgraph", "MAF", "other"]
         self.grouped_img = {key:[] for key in self.export_entries}
         self.grouped_img.update( {key:[] for key in self.nonexport_entries})
         
@@ -476,13 +476,6 @@ class lif_summary:
         if len(self.grouped_img["xyt"]) == 0:
             return        
         
-        #### hq export folder
-        lgfolder = self.outdir/"Videos"/"lg"
-        lgfolder.mkdir(parents=True, exist_ok=True)
-        #### compressed jpg export folder
-        smfolder = self.outdir/"Videos"/"sm"
-        smfolder.mkdir(parents=True, exist_ok=True)
-
         # iterate all entries
         for imgentry in self.grouped_img["xyt"]:
 
@@ -520,8 +513,15 @@ class lif_summary:
                 outpath = fluofolder/(img_name+fpsstring+'.tif')
                 self.save_single_tif(outarr, outpath, resolution_mpp)
                 
-            # else export as video
+            # else export as .mp4-video
             else:
+
+                #### hq export folder
+                lgfolder = self.outdir/"Videos"/"lg"
+                lgfolder.mkdir(parents=True, exist_ok=True)
+                #### compressed jpg export folder
+                smfolder = self.outdir/"Videos"/"sm"
+                smfolder.mkdir(parents=True, exist_ok=True)
             
                 # reduce Nx/ Ny by 1 px if not divisble by 2 -> otherwise issue exporting with h264 codec
                 if Nx % 2 != 0:
@@ -631,6 +631,54 @@ class lif_summary:
                 
                 print("video export finished in", time.time()-startt, "s")
 
+    def export_xyct(self):
+        """
+            exports all xyct image entries (=multichannel video/ timelapse entries)
+            exports as multipage .tif
+            
+        """
+        # check if entries to export        
+        if len(self.grouped_img["xyct"]) == 0:
+            return     
+
+        #### export folder
+        expfolder = self.outdir/"Videos"/"xyct"
+        expfolder.mkdir(parents=True, exist_ok=True)    
+        
+        # iterate all entries
+        for imgentry in self.grouped_img["xyct"]:
+
+            self._log_img(imgentry)
+            resolution_mpp = 1.0/imgentry["scale_n"][1]
+            img_idx = imgentry["idx"]
+            img_name = imgentry["name"]
+            fps = imgentry['fps']
+            Nx, Ny, NT = imgentry["dims"][0], imgentry["dims"][1], imgentry["dims"][3]
+            NC = imgentry["channels"]
+            print(f"exporting multichannel video {img_name}")
+            imghandler = self.lifhandler.get_image(img_idx)
+            
+            # create empty array
+            outdim = (NT,1,NC,Ny,Nx) # order: NT, Nz, Nc, Ny, Nx, take care, Nx, Ny inverted!
+            if imgentry['bit_depth'][0] == 16:
+                outdtype = 'uint16'
+            elif imgentry['bit_depth'][0] == 8:
+                outdtype = 'uint8'
+            outarr = np.zeros(outdim, dtype =outdtype)            
+
+            # fill array with frames
+            for framenr in tqdm.tqdm(np.arange(NT), desc="Frame",
+                    file = sys.stdout, position = 0, leave=True, total=NT):                
+
+                channel_list = [np.array(img) for img in imghandler.get_iter_c(t=framenr, z=0)]
+                img_xyc = np.array(channel_list)
+                
+                outarr[framenr,0] = img_xyc
+
+            fpsstring = f"-{fps:.2f}_fps".replace(".","_")
+            outpath = expfolder/(img_name+fpsstring+'.tif')
+            self.save_single_tif(outarr, outpath, resolution_mpp)            
+            
     def export_all(self):
         """ 
             exports xy, xyc, xyz, xyt entries (all currently supported export options)
@@ -641,6 +689,7 @@ class lif_summary:
         self.export_xyz()
         self.export_xyc()
         self.export_xyt(min_rangespan = 0.2, max_clipped = 0.6)
+        self.export_xyct()
 
     def save_single_tif(self, image, path, resolution_mpp, photometric = None, compress = None):
         """
