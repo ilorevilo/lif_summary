@@ -142,8 +142,11 @@ class lif_summary:
         tsquery = self._build_query(imgentry,"Data/Image/TimeStampList")
         rootel = self.lifhandler.xml_root
         # try:
-        ts = rootel.find(tsquery).text
-        ts = ts.split(" ")[0]
+        ts = rootel.find(tsquery)
+        if ts is not None:
+            ts = ts.text.split(" ")[0]
+        else:
+            return 0
         # except (AttributeError, TypeError):
         # return None
         
