@@ -143,9 +143,9 @@ class lif_summary:
         rootel = self.lifhandler.xml_root
         # try:
         ts = rootel.find(tsquery)
-        if ts is not None:
+        try: 
             ts = ts.text.split(" ")[0]
-        else:
+        except AttributeError:
             return 0
         # except (AttributeError, TypeError):
         # return None
